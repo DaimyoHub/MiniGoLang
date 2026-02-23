@@ -224,7 +224,6 @@ module Func = struct
           if te.expr_typ = Tint then mk (TEincdec (te, op)) Tint
           else report Incdec e.pexpr_loc
 
-    (** Typing function calls. *)
     and gen_call ctx (ident : Ast.ident) (args : pexpr list) : expr t =
       let* (fn, _) = fetch_func_from_id decls ident.id <?> dummy_err in
       let* t_args  = gen_exprs ctx args <?> (Args, ident.loc) in
@@ -243,7 +242,6 @@ module Func = struct
         if not typs_ok then report Args ident.loc
         else mk (TEcall (fn, t_args)) (Util.typ_of_typ_list fn.fn_typ)
 
-    (** Typing binary expressions *)
     and gen_binop ctx bop e1 e2 : expr t =
       let* t1 = gen_expr ctx e1 <?> (Lhs, e1.pexpr_loc) in
       let* t2 = gen_expr ctx e2 <?> (Rhs, e2.pexpr_loc) in
@@ -288,7 +286,6 @@ module Func = struct
           | Tint, _ | Tstring, _ -> report Binop e2.pexpr_loc
           | _ -> report Binop e1.pexpr_loc
 
-    (** Typing unary expressions *)
     and gen_unop ctx uop e : expr t =
       let* te = gen_expr ctx e <?> (Unop, e.pexpr_loc) in
       

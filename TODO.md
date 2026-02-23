@@ -1,0 +1,7 @@
+- Rethink the project's files hierarchy
+- Add a testing folder with a lot of go files to check
+- Comment :
+  - typechecker (typing.ml)
+  - monadic error handling (error.ml)
+  - symbol resolution (symres.ml)
+- [NOT NECESSARY] Improve the location report system because it currently sucks
