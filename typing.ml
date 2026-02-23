@@ -321,7 +321,6 @@ let file ~debug:b (imp, dl : Ast.pfile) : Tast.tfile =
   debug := b;
 
   let tfile = ref [] in
-
   (* We first generate structures' typed declarations *)
   List.iter
     (function
@@ -331,7 +330,14 @@ let file ~debug:b (imp, dl : Ast.pfile) : Tast.tfile =
              s_fields = Hashtbl.create 4;
              s_list   = [];
              s_size   = 0 }
-         in
+         in (if List.exists (fun td ->
+           match td with
+           | TDstruct s when s.s_name = ps.ps_name.id -> true
+           | _ -> false)
+           !tfile
+         then raise (Err (ps.ps_name.loc, Rep (Several_structs, ps.ps_name.loc, Nil)))
+         else ()
+         );
          tfile := !tfile @ [TDstruct strc];
          let ofs = ref 0 in
          let fields =
