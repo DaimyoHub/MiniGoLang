@@ -39,6 +39,8 @@ type err =
   | Unknown_typ
   | Import_not_used
   | Main_non_void
+  | Duplicate_fields 
+  | Duplicate_params
 
 type rep =
   | Rep of err * location * rep

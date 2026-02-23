@@ -62,6 +62,14 @@ end
 
 module Func = struct
 
+  (* TODO: Maybe use hashtable if there is nothing else to do in the project *)
+  let rec find_dup_param (params : (Ast.ident * ptyp) list) :  Ast.ident option  =
+    match params with
+    | [] -> None
+    | (ident, _) :: rest ->
+        if List.exists (fun (id, _) -> id.id = ident.id) rest then Some ident
+        else find_dup_param rest
+    
   let gen_signature (decls : tfile) (func : pfunc) : function_ t =
     if List.exists (fun td ->
       match td with
@@ -69,7 +77,10 @@ module Func = struct
       | _ -> false)
       decls
     then report Several_funcs func.pf_name.loc
-    else 
+    else match find_dup_param func.pf_params with
+          | Some ident -> report Duplicate_params ident.loc
+          | None -> 
+
     let loc = func.pf_name.loc in
     let* param_typs =
       Util.map_typs decls (List.map snd func.pf_params) <?> (Params, loc)
@@ -83,7 +94,7 @@ module Func = struct
     return
       { fn_name   = func.pf_name.id;
         fn_params = params;
-        fn_typ    = ret_typs }
+        fn_typ    = ret_typs } 
 
   let gen_body (fn_sig : function_) (decls : tfile) (func : pfunc) : expr t =
     let open Util in
@@ -347,7 +358,8 @@ let file ~debug:b (imp, dl : Ast.pfile) : Tast.tfile =
              | Ok ft ->
                  let f = { f_name = fid.id; f_typ = ft; f_ofs = !ofs } in
                  ofs := !ofs + 8;
-                 Hashtbl.add strc.s_fields fid.id f;
+                 if (Hashtbl.mem strc.s_fields fid.id) then raise (Err (fid.loc, Rep (Duplicate_fields, fid.loc, Nil)))
+                 else Hashtbl.add strc.s_fields fid.id f;
                  f)
            ps.ps_fields
          in
