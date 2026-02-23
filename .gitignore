@@ -1,2 +1,3 @@
 _build/
 minigo.exe
+test.go
