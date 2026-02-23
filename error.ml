@@ -38,6 +38,7 @@ type err =
   | Field_not_found
   | Unknown_typ
   | Import_not_used
+  | Main_non_void
 
 type rep =
   | Rep of err * location * rep

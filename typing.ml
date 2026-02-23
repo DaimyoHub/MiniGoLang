@@ -366,15 +366,13 @@ let file ~debug:b (imp, dl : Ast.pfile) : Tast.tfile =
     (function
      | PDstruct _ -> ()
      | PDfunction pf ->
-         let () =
            match Func.gen_signature !tfile pf with
            | Error rep -> raise (Err (pf.pf_name.loc, rep))
-           | Ok fn_sig ->
+           | Ok fn_sig -> if pf.pf_name.id = "main" 
+               then (main_defined := true; if fn_sig.fn_typ <> [] || fn_sig.fn_params <> [] then raise (Err (pf.pf_name.loc, Rep (Main_non_void, pf.pf_name.loc, Nil))));
                match Func.gen_body fn_sig !tfile pf with
                | Error rep -> raise (Err (pf.pf_name.loc, rep))
-               | Ok body -> tfile := TDfunction (fn_sig, body) :: !tfile
-        in
-        if pf.pf_name.id = "main" then main_defined := true)
+               | Ok body -> tfile := TDfunction (fn_sig, body) :: !tfile)
     dl;
 
   if not !main_defined then

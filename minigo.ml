@@ -104,6 +104,7 @@ let string_of_err = function
   | Object           -> "Expected object before dot."
   | Dot              -> "Dot expression is ill typed."
   | Import_not_used  -> "Imported package is not used."
+  | Main_non_void    -> "The 'main' function must have no return type and no arguments."
   | Dummy            -> ""
 
 let string_of_loc (loc : Ast.location) : string =
