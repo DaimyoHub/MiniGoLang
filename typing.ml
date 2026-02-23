@@ -69,7 +69,6 @@ module Func = struct
     | (ident, _) :: rest ->
         if List.exists (fun (id, _) -> id.id = ident.id) rest then Some ident
         else find_dup_param rest
-    
   let gen_signature (decls : tfile) (func : pfunc) : function_ t =
     if List.exists (fun td ->
       match td with
@@ -182,6 +181,9 @@ module Func = struct
                   mk (TEvars t_vars) (Tmany [])
                 else report Var e.pexpr_loc
             | None ->
+                match (List.find_opt (fun v-> v.pexpr_desc = PEnil) vals) with
+                | Some v -> report Untyped_Nil_init v.pexpr_loc
+                | None ->
                 let t_vars =
                   List.map2
                     (fun ident t_val ->

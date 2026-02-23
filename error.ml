@@ -41,6 +41,7 @@ type err =
   | Main_non_void
   | Duplicate_fields 
   | Duplicate_params
+  | Untyped_Nil_init
 
 type rep =
   | Rep of err * location * rep

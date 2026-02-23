@@ -107,6 +107,7 @@ let string_of_err = function
   | Main_non_void    -> "The 'main' function must have no return type and no arguments."
   | Duplicate_fields  -> "Duplicate field names in struct definition."
   | Duplicate_params  -> "Duplicate parameter names in function definition."
+  | Untyped_Nil_init -> "Nil initialization must have an explicit type."
   | Dummy            -> ""
 
 let string_of_loc (loc : Ast.location) : string =
