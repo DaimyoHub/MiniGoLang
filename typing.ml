@@ -8,6 +8,7 @@ open Symres
 
 let debug = ref false
 
+let has_print = ref false
 let dummy_loc = Lexing.dummy_pos, Lexing.dummy_pos
 
 let new_var : string -> Ast.location -> typ -> var =
@@ -62,6 +63,13 @@ end
 module Func = struct
 
   let gen_signature (decls : tfile) (func : pfunc) : function_ t =
+    if List.exists (fun td ->
+      match td with
+      | TDfunction (f, _) when f.fn_name = func.pf_name.id -> true
+      | _ -> false)
+      decls
+    then report Several_funcs func.pf_name.loc
+    else 
     let loc = func.pf_name.loc in
     let* param_typs =
       Util.map_typs decls (List.map snd func.pf_params) <?> (Params, loc)
@@ -228,7 +236,7 @@ module Func = struct
       let* (fn, _) = fetch_func_from_id decls ident.id <?> dummy_err in
       let* t_args  = gen_exprs ctx args <?> (Args, ident.loc) in
 
-      if fn.fn_name = "fmt.Print" then mk (TEprint t_args) (Tmany [])
+      if fn.fn_name = "fmt.Print" then (has_print := true; mk (TEprint t_args) (Tnil))
       else if fn.fn_name = "main" then report Calling_main ident.loc
       
       else if List.length t_args <> List.length fn.fn_params then
@@ -371,4 +379,6 @@ let file ~debug:b (imp, dl : Ast.pfile) : Tast.tfile =
 
   if not !main_defined then
     raise (Err (dummy_loc, Rep (Main_not_found, dummy_loc, Nil)))
+  else if imp && not !has_print then
+    raise (Err (dummy_loc, Rep (Import_not_used, dummy_loc, Nil)))
   else !tfile  

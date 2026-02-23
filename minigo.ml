@@ -103,6 +103,7 @@ let string_of_err = function
   | Unknown_typ      -> "Unknown type."
   | Object           -> "Expected object before dot."
   | Dot              -> "Dot expression is ill typed."
+  | Import_not_used  -> "Imported package is not used."
   | Dummy            -> ""
 
 let string_of_loc (loc : Ast.location) : string =

@@ -37,6 +37,7 @@ type err =
   | Var_not_found
   | Field_not_found
   | Unknown_typ
+  | Import_not_used
 
 type rep =
   | Rep of err * location * rep
