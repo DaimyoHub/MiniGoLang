@@ -18,7 +18,17 @@ let new_var : string -> Ast.location -> typ -> var =
       v_used = false; v_addr = false; v_ofs = -1 }
 
 (* I have to overload type equality because of the fact that we can type some
-   structure field in a structure A with a pointer to A. *)
+   structure field in a structure A with a pointer to A. If we use usual
+   structural equality in the typechecker, and try to analyze the following bloc
+   of code :
+
+   struct ABR {
+     left : ABR*
+     right : ABR*
+     value : T
+   }
+
+   We fall in an infinite loop. *)
 let ( == ) t1 t2 =
   let rec eq t1 t2 = match t1, t2 with
     | Tint,    Tint    -> true
@@ -180,6 +190,8 @@ module Func = struct
               List.for_all2
                 (fun lval rval ->
                   lval.expr_typ == rval.expr_typ ||
+                    (* We shouldn't forget that we can find statements such as
+                       'ptr = nil'. *)
                     (is_nilable lval.expr_typ && rval.expr_typ == Tnil))
                 t_lvalues t_rvalues
           then mk (TEassign (t_lvalues, t_rvalues)) (Tmany [])
@@ -199,6 +211,8 @@ module Func = struct
                   List.for_all
                     (fun t_val ->
                       t_val.expr_typ == typ ||
+                        (* We shouldn't forget that we can find statements such
+                           as 'var ptr = nil' *)
                         (t_val.expr_typ == Tnil && is_nilable typ))
                     t_vals
                 then
@@ -292,6 +306,9 @@ module Func = struct
           else report Incdec e.pexpr_loc
 
     and gen_call ctx (ident : Ast.ident) (args : pexpr list) : expr t =
+      (* The parser generates a classic call expression when finding the new
+         keyword. So we should handle typechking of it differently from other
+         calls before the function's name resolution. *)
       if ident.id = "new" then
         match List.map (fun p -> p.pexpr_desc) args with
         | [PEident pident] ->
@@ -329,7 +346,9 @@ module Func = struct
         | Tint, _ -> report Binop e2.pexpr_loc
         | _ -> report Binop e1.pexpr_loc
       in
-      
+
+      (* Same as in Vars/Assign, we shouldn't forget that we can find
+         expressions such as 'ptr == nil'. *)
       let cmp_eq () =               
         if ty1 == ty2
           || (ty1 == Tnil && is_nilable ty2)
@@ -441,7 +460,10 @@ let file ~debug:b (imp, dl : Ast.pfile) : Tast.tfile =
           match Func.gen_signature !tfile pf with
           | Error rep -> raise (Err (pf.pf_name.loc, rep))
           | Ok fn_sig ->
-              (* We have to allow recursive calls. *)
+              (* We have to allow recursive calls, so we add the currently
+                 analyzed function's name to the context just before typing it.
+                 We will overwrite this component of the context just after
+                 typechecking and only if it actually typechecks well. *)
               tfile := TDfunction (fn_sig, { expr_desc = TEskip; expr_typ = Tmany [] }) :: !tfile;
               match Func.gen_body fn_sig !tfile pf with
               | Error rep -> raise (Err (pf.pf_name.loc, rep))
