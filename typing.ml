@@ -46,7 +46,7 @@ let ( == ) t1 t2 =
 
 module Util = struct
 
-  let rec typ_of_ptyp (decls : tfile) (pt : ptyp) : typ t =
+  let rec typ_of_ptyp decls pt =
     match pt with
     | PTident ident ->
         (match ident.id with
@@ -65,7 +65,7 @@ module Util = struct
     | [t] -> t
     | ts  -> Tmany ts
 
-  let map_typs (decls : tfile) (pts : ptyp list) : typ list t =
+  let map_typs decls pts =
     List.fold_right
       (fun pt acc ->
         let* ts = acc <?> dummy_err in
@@ -73,7 +73,7 @@ module Util = struct
         return (t :: ts))
       pts (return [])
 
-  let rec find_return_typ (e : expr) : typ option =
+  let rec find_return_typ e =
     match e.expr_desc with
     | TEreturn _ -> Some e.expr_typ
     | TEblock es -> List.find_map find_return_typ es
@@ -84,7 +84,7 @@ module Util = struct
     | TEfor (_, body) -> find_return_typ body
     | _ -> None
 
-  let rec typ_of_string (decls : tfile) str =
+  let rec typ_of_string decls str =
     match str with
     | "int"    -> return Tint
     | "bool"   -> return Tbool
@@ -108,7 +108,7 @@ end
 
 module Func = struct
 
-  let gen_signature (decls : tfile) (func : pfunc) : function_ t =
+  let gen_signature decls func =
     let open Util in
     
     let loc = func.pf_name.loc in
@@ -126,7 +126,8 @@ module Func = struct
         fn_params = params;
         fn_typ    = ret_typs }
 
-  let gen_body (fn_sig : function_) (decls : tfile) (func : pfunc) : expr t =
+  (* That import_used is disgusting but it works. *)
+  let gen_body fn_sig decls func import_used =
     let open Util in
 
     let ret_typ = typ_of_typ_list fn_sig.fn_typ in
@@ -135,7 +136,7 @@ module Func = struct
 
     let init_ctx = List.map (fun v -> (v.v_name, v)) fn_sig.fn_params in
 
-    let rec gen_exprs ctx (es : pexpr list) : expr list Error.t =
+    let rec gen_exprs ctx es =
       List.fold_right
         (fun e acc ->
           let* tes = acc <?> dummy_err in
@@ -143,7 +144,7 @@ module Func = struct
           return (te :: tes))
         es (return [])
 
-    and gen_expr (ctx : (string * var) list) (e : pexpr) : expr t =
+    and gen_expr ctx e =
       match e.pexpr_desc with
 
       | PEskip -> mk TEskip (Tmany [])
@@ -163,7 +164,7 @@ module Func = struct
 
       | PEunop (uop, e) -> gen_unop ctx uop e
 
-      | PEcall (ident, args) -> gen_call ctx ident args
+      | PEcall (ident, args) -> gen_call ctx ident args import_used
 
       | PEdot (e, field_id) ->
           let* te = gen_expr ctx e <?> (Dot, e.pexpr_loc) in
@@ -305,7 +306,7 @@ module Func = struct
           if te.expr_typ == Tint then mk (TEincdec (te, op)) Tint
           else report Incdec e.pexpr_loc
 
-    and gen_call ctx (ident : Ast.ident) (args : pexpr list) : expr t =
+    and gen_call ctx ident args import_used =
       (* The parser generates a classic call expression when finding the new
          keyword. So we should handle typechking of it differently from other
          calls before the function's name resolution. *)
@@ -320,7 +321,11 @@ module Func = struct
       let* (fn, _) = fetch_func_from_id decls ident.id <?> dummy_err in      
       let* t_args  = gen_exprs ctx args <?> (Args, ident.loc) in
 
-      if      fn.fn_name = "fmt.Print" then mk (TEprint t_args) (Tmany [])
+      if      fn.fn_name = "fmt.Print" then
+        begin
+          import_used := true;
+          mk (TEprint t_args) (Tmany [])
+        end
       else if fn.fn_name = "main"      then report Calling_main ident.loc
       
       else if List.length t_args <> List.length fn.fn_params then
@@ -334,7 +339,7 @@ module Func = struct
         if not typs_ok then report Args ident.loc
         else mk (TEcall (fn, t_args)) (Util.typ_of_typ_list fn.fn_typ)
 
-    and gen_binop ctx bop e1 e2 : expr t =
+    and gen_binop ctx bop e1 e2 =
       let* t1 = gen_expr ctx e1 <?> (Lhs, e1.pexpr_loc) in
       let* t2 = gen_expr ctx e2 <?> (Rhs, e2.pexpr_loc) in
       
@@ -383,7 +388,7 @@ module Func = struct
           | Tint, _ | Tstring, _ -> report Binop e2.pexpr_loc
           | _ -> report Binop e1.pexpr_loc
 
-    and gen_unop ctx uop e : expr t =
+    and gen_unop ctx uop e =
       let* te = gen_expr ctx e <?> (Unop, e.pexpr_loc) in
       
       match uop with
@@ -406,7 +411,7 @@ end
 
 exception Err of Ast.location * Error.rep
 
-let file ~debug:b (imp, dl : Ast.pfile) : Tast.tfile =
+let file ~debug:b (imp, dl : Ast.pfile) =
   debug := b;
 
   let tfile = ref [] in
@@ -452,6 +457,8 @@ let file ~debug:b (imp, dl : Ast.pfile) : Tast.tfile =
   end;
   
   let main_defined = ref false in
+  let import_used = ref false in
+
   List.iter
     (function
     | PDstruct _ -> ()
@@ -465,7 +472,7 @@ let file ~debug:b (imp, dl : Ast.pfile) : Tast.tfile =
                  We will overwrite this component of the context just after
                  typechecking and only if it actually typechecks well. *)
               tfile := TDfunction (fn_sig, { expr_desc = TEskip; expr_typ = Tmany [] }) :: !tfile;
-              match Func.gen_body fn_sig !tfile pf with
+              match Func.gen_body fn_sig !tfile pf import_used with
               | Error rep -> raise (Err (pf.pf_name.loc, rep))
               | Ok body ->
                   tfile :=
@@ -481,4 +488,6 @@ let file ~debug:b (imp, dl : Ast.pfile) : Tast.tfile =
 
   if not !main_defined then
     raise (Err (dummy_loc, Rep (Main_not_found, dummy_loc, Nil)))
+  else if not !import_used then
+    raise (Err (dummy_loc, Rep (Fmt_import_not_used, dummy_loc, Nil)))
   else !tfile  
