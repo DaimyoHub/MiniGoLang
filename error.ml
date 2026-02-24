@@ -38,6 +38,12 @@ type err =
   | Var_not_found
   | Field_not_found
   | Unknown_typ
+  | Import_not_used
+  | Main_non_void
+  | Duplicate_fields 
+  | Duplicate_params
+  | Untyped_Nil_init
+  | Underscore_as_param
   | Invalid_typ
 
 type rep =

@@ -8,6 +8,7 @@ open Symres
 
 let debug = ref false
 
+let has_print = ref false
 let dummy_loc = Lexing.dummy_pos, Lexing.dummy_pos
 
 let new_var : string -> Ast.location -> typ -> var =
@@ -108,7 +109,28 @@ end
 
 module Func = struct
 
+  (* TODO: Maybe use hashtable if there is nothing else to do in the project *)
+  let rec find_dup_param (params : (Ast.ident * ptyp) list) :  Ast.ident option  =
+    match params with
+    | [] -> None
+    | (ident, _) :: rest ->
+        if List.exists (fun (id, _) -> id.id = ident.id) rest then Some ident
+        else find_dup_param rest
   let gen_signature (decls : tfile) (func : pfunc) : function_ t =
+    if List.exists (fun td ->
+      match td with
+      | TDfunction (f, _) when f.fn_name = func.pf_name.id -> true
+      | _ -> false)
+      decls
+    then report Several_funcs func.pf_name.loc
+    else
+      match find_dup_param func.pf_params with
+          | Some ident -> report Duplicate_params ident.loc
+          | None -> (
+    (* Check if a parameter is called _ and report errror *)
+    if List.find_opt (fun (ident, _) -> ident.id = "_") func.pf_params <> None then
+      report Underscore_as_param func.pf_name.loc
+    else
     let open Util in
     
     let loc = func.pf_name.loc in
@@ -124,7 +146,7 @@ module Func = struct
     return
       { fn_name   = func.pf_name.id;
         fn_params = params;
-        fn_typ    = ret_typs }
+        fn_typ    = ret_typs } )
 
   let gen_body (fn_sig : function_) (decls : tfile) (func : pfunc) : expr t =
     let open Util in
@@ -224,6 +246,9 @@ module Func = struct
                   mk (TEvars t_vars) (Tmany [])
                 else report Var e.pexpr_loc
             | None ->
+                match (List.find_opt (fun v-> v.pexpr_desc = PEnil) vals) with
+                | Some v -> report Untyped_Nil_init v.pexpr_loc
+                | None ->
                 let t_vars =
                   List.map2
                     (fun ident t_val ->
@@ -320,8 +345,8 @@ module Func = struct
       let* (fn, _) = fetch_func_from_id decls ident.id <?> dummy_err in      
       let* t_args  = gen_exprs ctx args <?> (Args, ident.loc) in
 
-      if      fn.fn_name = "fmt.Print" then mk (TEprint t_args) (Tmany [])
-      else if fn.fn_name = "main"      then report Calling_main ident.loc
+      if fn.fn_name = "fmt.Print" then (has_print := true; mk (TEprint t_args) (Tnil))
+      else if fn.fn_name = "main" then report Calling_main ident.loc
       
       else if List.length t_args <> List.length fn.fn_params then
         report Arity ident.loc
@@ -410,7 +435,6 @@ let file ~debug:b (imp, dl : Ast.pfile) : Tast.tfile =
   debug := b;
 
   let tfile = ref [] in
-
   (* We first generate structures' typed declarations *)
   List.iter
     (function
@@ -420,7 +444,14 @@ let file ~debug:b (imp, dl : Ast.pfile) : Tast.tfile =
              s_fields = Hashtbl.create 4;
              s_list   = [];
              s_size   = 0 }
-         in
+         in (if List.exists (fun td ->
+           match td with
+           | TDstruct s when s.s_name = ps.ps_name.id -> true
+           | _ -> false)
+           !tfile
+         then raise (Err (ps.ps_name.loc, Rep (Several_structs, ps.ps_name.loc, Nil)))
+         else ()
+         );
          tfile := !tfile @ [TDstruct strc];
          let ofs = ref 0 in
          let fields =
@@ -430,7 +461,8 @@ let file ~debug:b (imp, dl : Ast.pfile) : Tast.tfile =
              | Ok ft ->
                  let f = { f_name = fid.id; f_typ = ft; f_ofs = !ofs } in
                  ofs := !ofs + 8;
-                 Hashtbl.add strc.s_fields fid.id f;
+                 if (Hashtbl.mem strc.s_fields fid.id) then raise (Err (fid.loc, Rep (Duplicate_fields, fid.loc, Nil)))
+                 else Hashtbl.add strc.s_fields fid.id f;
                  f)
            ps.ps_fields
          in
@@ -454,31 +486,19 @@ let file ~debug:b (imp, dl : Ast.pfile) : Tast.tfile =
   let main_defined = ref false in
   List.iter
     (function
-    | PDstruct _ -> ()
-    | PDfunction pf ->
-        let () =
-          match Func.gen_signature !tfile pf with
-          | Error rep -> raise (Err (pf.pf_name.loc, rep))
-          | Ok fn_sig ->
-              (* We have to allow recursive calls, so we add the currently
-                 analyzed function's name to the context just before typing it.
-                 We will overwrite this component of the context just after
-                 typechecking and only if it actually typechecks well. *)
-              tfile := TDfunction (fn_sig, { expr_desc = TEskip; expr_typ = Tmany [] }) :: !tfile;
-              match Func.gen_body fn_sig !tfile pf with
-              | Error rep -> raise (Err (pf.pf_name.loc, rep))
-              | Ok body ->
-                  tfile :=
-                    List.map
-                      (function
-                       | TDfunction (fn, _) when fn.fn_name = fn_sig.fn_name ->
-                          TDfunction (fn_sig, body)
-                       | d -> d)
-                      !tfile
-        in     
-        if pf.pf_name.id = "main" then main_defined := true)
+     | PDstruct _ -> ()
+     | PDfunction pf ->
+           match Func.gen_signature !tfile pf with
+           | Error rep -> raise (Err (pf.pf_name.loc, rep))
+           | Ok fn_sig -> if pf.pf_name.id = "main" 
+               then (main_defined := true; if fn_sig.fn_typ <> [] || fn_sig.fn_params <> [] then raise (Err (pf.pf_name.loc, Rep (Main_non_void, pf.pf_name.loc, Nil))));
+               match Func.gen_body fn_sig !tfile pf with
+               | Error rep -> raise (Err (pf.pf_name.loc, rep))
+               | Ok body -> tfile := TDfunction (fn_sig, body) :: !tfile)
     dl;
 
   if not !main_defined then
     raise (Err (dummy_loc, Rep (Main_not_found, dummy_loc, Nil)))
+  else if imp && not !has_print then
+    raise (Err (dummy_loc, Rep (Import_not_used, dummy_loc, Nil)))
   else !tfile  
