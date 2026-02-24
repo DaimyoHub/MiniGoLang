@@ -76,10 +76,14 @@ module Func = struct
       | _ -> false)
       decls
     then report Several_funcs func.pf_name.loc
-    else match find_dup_param func.pf_params with
+    else
+      match find_dup_param func.pf_params with
           | Some ident -> report Duplicate_params ident.loc
-          | None -> 
-
+          | None -> (
+    (* Check if a parameter is called _ and report errror *)
+    if List.find_opt (fun (ident, _) -> ident.id = "_") func.pf_params <> None then
+      report Underscore_as_param func.pf_name.loc
+    else
     let loc = func.pf_name.loc in
     let* param_typs =
       Util.map_typs decls (List.map snd func.pf_params) <?> (Params, loc)
@@ -93,7 +97,7 @@ module Func = struct
     return
       { fn_name   = func.pf_name.id;
         fn_params = params;
-        fn_typ    = ret_typs } 
+        fn_typ    = ret_typs } )
 
   let gen_body (fn_sig : function_) (decls : tfile) (func : pfunc) : expr t =
     let open Util in
