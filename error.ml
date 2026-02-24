@@ -27,6 +27,7 @@ type err =
   | Args
   | Dot
   | Object
+  | New
 
   | Func_not_found
   | Struct_not_found
@@ -43,6 +44,7 @@ type err =
   | Duplicate_params
   | Untyped_Nil_init
   | Underscore_as_param
+  | Invalid_typ
 
 type rep =
   | Rep of err * location * rep

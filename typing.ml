@@ -18,16 +18,43 @@ let new_var : string -> Ast.location -> typ -> var =
     { v_name = x; v_id = !id; v_loc = loc; v_typ = ty;
       v_used = false; v_addr = false; v_ofs = -1 }
 
+(* I have to overload type equality because of the fact that we can type some
+   structure field in a structure A with a pointer to A. If we use usual
+   structural equality in the typechecker, and try to analyze the following bloc
+   of code :
+
+   struct ABR {
+     left : ABR*
+     right : ABR*
+     value : T
+   }
+
+   We fall in an infinite loop. *)
+let ( == ) t1 t2 =
+  let rec eq t1 t2 = match t1, t2 with
+    | Tint,    Tint    -> true
+    | Tbool,   Tbool   -> true
+    | Tstring, Tstring -> true
+    | Tnil,    Tnil    -> true
+    | Tptr t1, Tptr t2 -> eq t1 t2
+    | Tstruct s1, Tstruct s2 -> Stdlib.(==) s1 s2
+    | Tmany ts1, Tmany ts2 ->
+        List.length ts1 = List.length ts2 &&
+        List.for_all2 eq ts1 ts2
+    | _ -> false
+  in
+  eq t1 t2
+
 module Util = struct
 
   let rec typ_of_ptyp (decls : tfile) (pt : ptyp) : typ t =
     match pt with
-    | PTident id ->
-        (match id.id with
+    | PTident ident ->
+        (match ident.id with
          | "int"    -> return Tint
          | "bool"   -> return Tbool
          | "string" -> return Tstring
-         | name     ->
+         | name     -> 
              let* s = fetch_struct_from_id decls name <?> dummy_err in
              return (Tstruct s))
     | PTptr inner ->
@@ -58,6 +85,26 @@ module Util = struct
     | TEfor (_, body) -> find_return_typ body
     | _ -> None
 
+  let rec typ_of_string (decls : tfile) str =
+    match str with
+    | "int"    -> return Tint
+    | "bool"   -> return Tbool
+    | "string" -> return Tstring
+    | _ ->
+        let n = String.length str in
+        if n > 0 then
+          if str.[0] = '*' then
+            let* rec_typ =
+              typ_of_string decls (String.sub str 1 (n - 1)) <?> dummy_err
+            in return (Tptr rec_typ)
+          else
+            let* strc = fetch_struct_from_id decls str <?> dummy_err in
+            return (Tstruct strc)
+        else report Invalid_typ dummy_loc
+
+
+  let is_nilable = function Tptr _ | Tnil -> true | _ -> false
+
 end
 
 module Func = struct
@@ -84,11 +131,13 @@ module Func = struct
     if List.find_opt (fun (ident, _) -> ident.id = "_") func.pf_params <> None then
       report Underscore_as_param func.pf_name.loc
     else
+    let open Util in
+    
     let loc = func.pf_name.loc in
     let* param_typs =
-      Util.map_typs decls (List.map snd func.pf_params) <?> (Params, loc)
+      map_typs decls (List.map snd func.pf_params) <?> (Params, loc)
     in
-    let* ret_typs = Util.map_typs decls func.pf_typ <?> (Return, loc) in
+    let* ret_typs = map_typs decls func.pf_typ <?> (Return, loc) in
     let params =
       List.map2
         (fun (ident, _) ty -> new_var ident.id ident.loc ty)
@@ -161,7 +210,11 @@ module Func = struct
           if
             List.length t_lvalues = List.length t_rvalues &&
               List.for_all2
-                (fun lval rval -> lval.expr_typ = rval.expr_typ)
+                (fun lval rval ->
+                  lval.expr_typ == rval.expr_typ ||
+                    (* We shouldn't forget that we can find statements such as
+                       'ptr = nil'. *)
+                    (is_nilable lval.expr_typ && rval.expr_typ == Tnil))
                 t_lvalues t_rvalues
           then mk (TEassign (t_lvalues, t_rvalues)) (Tmany [])
           else report Assignments e.pexpr_loc
@@ -176,7 +229,15 @@ module Func = struct
                 let* typ =
                   typ_of_ptyp decls ptyp <?> (Unknown_typ, e.pexpr_loc)
                 in
-                if List.for_all (fun t_val -> t_val.expr_typ = typ) t_vals then
+                if
+                  List.for_all
+                    (fun t_val ->
+                      t_val.expr_typ == typ ||
+                        (* We shouldn't forget that we can find statements such
+                           as 'var ptr = nil' *)
+                        (t_val.expr_typ == Tnil && is_nilable typ))
+                    t_vals
+                then
                   let t_vars =
                     List.map
                       (fun ident -> new_var ident.id ident.loc typ)
@@ -198,23 +259,28 @@ module Func = struct
           end
           
       | PEif (cond, e1, e2) ->
-          let* t_cond = gen_expr ctx cond <?> (Cond, cond.pexpr_loc) in
-          if t_cond.expr_typ <> Tbool then report Cond cond.pexpr_loc
+          let* t_cond = gen_expr ctx cond <?> (Cond, cond.pexpr_loc) in               
+          if not (t_cond.expr_typ == Tbool) then report Cond cond.pexpr_loc
           else
             let* t_e1 = gen_expr ctx e1 <?> (If_branch, e1.pexpr_loc)   in
             let* t_e2 = gen_expr ctx e2 <?> (Else_branch, e2.pexpr_loc) in
             begin
               match find_return_typ t_e1, find_return_typ t_e2 with
               | None, None -> mk (TEif (t_cond, t_e1, t_e2)) (Tmany [])
-              | Some t1, Some t2 when t1 = t2 ->
+              | Some t1, Some t2 when t1 == t2 ->
                   mk (TEif (t_cond, t_e1, t_e2)) t1
+              (* If the conditional returns in the first branch and does not
+                 define the else branch, we shouldn't check branches typing
+                 constraints (because there are none). *)
+              | Some t, None when t_e2.expr_desc = TEskip ->
+                  mk (TEif (t_cond, t_e1, t_e2)) t
               | _ -> report If e.pexpr_loc
             end
 
       | PEreturn exprs ->
           let* t_exprs = gen_exprs ctx exprs <?> (Return, e.pexpr_loc) in
           if
-            ret_typ =
+            ret_typ ==
               (typ_of_typ_list
                 (List.map (fun t_expr -> t_expr.expr_typ) t_exprs))
           then mk (TEreturn t_exprs) ret_typ
@@ -224,17 +290,32 @@ module Func = struct
           (* I report a dummy error to not flood the full error report. Blocks
              are used in every statements and it doesn't help to know that some
              of it is ill typed. *)
-          let* t_exprs = gen_exprs ctx exprs <?> dummy_err in
-          let t_ret =
-            match List.find_map find_return_typ t_exprs with
-            | Some t -> t
-            | None -> Tmany []
+          let rec gen_block ctx acc = function
+            | [] ->
+                let t_exprs = List.rev acc in
+                let t_ret =
+                  match List.find_map find_return_typ t_exprs with
+                  | Some t -> t
+                  | None -> Tmany []
+                in
+                mk (TEblock t_exprs) t_ret
+            | e :: rest ->
+                let* te = gen_expr ctx e <?> dummy_err in
+                (* We mustn't forget that each time with declare a variable it
+                   should be added to the current's block context. *)
+                let ctx' =
+                  match te.expr_desc with
+                  | TEvars vars ->
+                      List.fold_left (fun ctx v -> (v.v_name, v) :: ctx) ctx vars
+                  | _ -> ctx
+                in
+                gen_block ctx' (te :: acc) rest
           in
-          mk (TEblock t_exprs) t_ret
+          gen_block ctx [] exprs
 
       | PEfor (cond, body) ->
           let* t_cond = gen_expr ctx cond <?> (Cond, cond.pexpr_loc) in
-          if t_cond.expr_typ <> Tbool then report Cond cond.pexpr_loc
+          if not (t_cond.expr_typ == Tbool) then report Cond cond.pexpr_loc
           else
             let* t_body = gen_expr ctx body <?> (For_branch, body.pexpr_loc) in
             let t_ret = 
@@ -246,11 +327,22 @@ module Func = struct
 
       | PEincdec (e, op) ->
           let* te = gen_expr ctx e <?> (Incdec, e.pexpr_loc) in
-          if te.expr_typ = Tint then mk (TEincdec (te, op)) Tint
+          if te.expr_typ == Tint then mk (TEincdec (te, op)) Tint
           else report Incdec e.pexpr_loc
 
     and gen_call ctx (ident : Ast.ident) (args : pexpr list) : expr t =
-      let* (fn, _) = fetch_func_from_id decls ident.id <?> dummy_err in
+      (* The parser generates a classic call expression when finding the new
+         keyword. So we should handle typechking of it differently from other
+         calls before the function's name resolution. *)
+      if ident.id = "new" then
+        match List.map (fun p -> p.pexpr_desc) args with
+        | [PEident pident] ->
+            let* typ = typ_of_string decls pident.id <?> (New, ident.loc) in
+            mk (TEnew typ) (Tptr typ)
+        | _ -> report New ident.loc
+      else
+      
+      let* (fn, _) = fetch_func_from_id decls ident.id <?> dummy_err in      
       let* t_args  = gen_exprs ctx args <?> (Args, ident.loc) in
 
       if fn.fn_name = "fmt.Print" then (has_print := true; mk (TEprint t_args) (Tnil))
@@ -261,7 +353,7 @@ module Func = struct
       else
         let typs_ok =
           List.for_all2
-            (fun te param -> te.expr_typ = param.v_typ || te.expr_typ = Tnil)
+            (fun te param -> te.expr_typ == param.v_typ || te.expr_typ == Tnil)
             t_args fn.fn_params
         in
         if not typs_ok then report Args ident.loc
@@ -279,9 +371,14 @@ module Func = struct
         | Tint, _ -> report Binop e2.pexpr_loc
         | _ -> report Binop e1.pexpr_loc
       in
-      
+
+      (* Same as in Vars/Assign, we shouldn't forget that we can find
+         expressions such as 'ptr == nil'. *)
       let cmp_eq () =               
-        if ty1 = ty2 then mk (TEbinop (bop, t1, t2)) Tbool
+        if ty1 == ty2
+          || (ty1 == Tnil && is_nilable ty2)
+          || (ty2 == Tnil && is_nilable ty1)
+        then mk (TEbinop (bop, t1, t2)) Tbool
         else report Binop e2.pexpr_loc
       in
       
@@ -316,10 +413,10 @@ module Func = struct
       
       match uop with
        | Uneg  ->
-           if te.expr_typ = Tint  then mk (TEunop (Uneg,  te)) Tint
+           if te.expr_typ == Tint  then mk (TEunop (Uneg,  te)) Tint
            else report Unop e.pexpr_loc
        | Unot  ->
-           if te.expr_typ = Tbool then mk (TEunop (Unot,  te)) Tbool
+           if te.expr_typ == Tbool then mk (TEunop (Unot,  te)) Tbool
            else report Unop e.pexpr_loc
        | Uamp  -> mk (TEunop (Uamp,  te)) (Tptr te.expr_typ)
        | Ustar ->
@@ -382,7 +479,8 @@ let file ~debug:b (imp, dl : Ast.pfile) : Tast.tfile =
         fn_typ    = []; }
     in
     tfile :=
-      [TDfunction (fmt_print, { expr_desc = TEskip; expr_typ = Tmany [] })]
+      (TDfunction (fmt_print, { expr_desc = TEskip; expr_typ = Tmany [] }))
+        :: !tfile
   end;
   
   let main_defined = ref false in
