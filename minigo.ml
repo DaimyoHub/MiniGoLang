@@ -103,6 +103,8 @@ let string_of_err = function
   | Unknown_typ      -> "Unknown type."
   | Object           -> "Expected object before dot."
   | Dot              -> "Dot expression is ill typed."
+  | New              -> "New expression is ill typed."
+  | Invalid_typ      -> "Found an invalid type."
   | Dummy            -> ""
 
 let string_of_loc (loc : Ast.location) : string =
@@ -128,7 +130,9 @@ let parse_type_error_report (r : rep) : string =
     | Rep (err, loc, rest) ->
         loop rest ^
           (if err = Dummy then "" else
-            "  -> " ^ (string_of_err err) ^ " (" ^ string_of_loc loc ^ ")\n")
+            "  -> " ^ (string_of_err err) ^
+            (if loc = dummy_loc then "\n"
+             else " (" ^ string_of_loc loc ^ ")\n"))
     | Nil -> ""
   in loop (clean_report r)
 

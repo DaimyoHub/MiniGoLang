@@ -27,6 +27,7 @@ type err =
   | Args
   | Dot
   | Object
+  | New
 
   | Func_not_found
   | Struct_not_found
@@ -37,6 +38,7 @@ type err =
   | Var_not_found
   | Field_not_found
   | Unknown_typ
+  | Invalid_typ
 
 type rep =
   | Rep of err * location * rep
