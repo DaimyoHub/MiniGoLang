@@ -45,6 +45,104 @@ let ( == ) t1 t2 =
   in
   eq t1 t2
 
+module Desugar = struct
+  open Ast
+
+  (* Build PEident expression from an ident *)
+  let pe_ident (id:ident) : pexpr =
+    { pexpr_desc = PEident id; pexpr_loc = id.loc }
+
+  (* Desugar inside a list of statements (block contents).
+     This is where we can expand one stmt into multiple stmts. *)
+  let rec ds_stmt_list (es : pexpr list) : pexpr list =
+    List.concat_map ds_stmt es
+
+  (* Desugar one "statement-ish" expression into 1 or more statements *)
+  and ds_stmt (e : pexpr) : pexpr list =
+    match e.pexpr_desc with
+    | PEblock es ->
+        let es' = ds_stmt_list es in
+        [ { e with pexpr_desc = PEblock es' } ]
+
+    | PEif (c, t, f) ->
+        let c' = ds_expr c in
+        let t' = ds_expr t in
+        let f' = ds_expr f in
+        [ { e with pexpr_desc = PEif (c', t', f') } ]
+
+    | PEfor (c, body) ->
+        let c' = ds_expr c in
+        let body' = ds_expr body in
+        [ { e with pexpr_desc = PEfor (c', body') } ]
+
+    | PEassign (lhs, rhs) ->
+        [ { e with pexpr_desc = PEassign (List.map ds_expr lhs, List.map ds_expr rhs) } ]
+
+    | PEreturn rs ->
+        [ { e with pexpr_desc = PEreturn (List.map ds_expr rs) } ]
+
+    | PEincdec (x, op) ->
+        [ { e with pexpr_desc = PEincdec (ds_expr x, op) } ]
+
+    | PEvars (ids, Some t, vals) when vals <> [] ->
+        (* IMPORTANT: only safe for typed vars. *)
+        let decl =
+          { e with pexpr_desc = PEvars (ids, Some t, []) }
+        in
+        let assign =
+          { pexpr_desc = PEassign (List.map pe_ident ids, List.map ds_expr vals);
+            pexpr_loc  = e.pexpr_loc; }
+        in
+        [ decl; assign ]
+
+    | PEvars (ids, typ_opt, vals) ->
+        (* Leave untyped-with-init alone; still recurse into RHS expressions. *)
+        let vals' = List.map ds_expr vals in
+        [ { e with pexpr_desc = PEvars (ids, typ_opt, vals') } ]
+
+    | _ ->
+        (* Expression-statement, etc. Just recurse in place. *)
+        [ ds_expr e ]
+
+  (* Desugar inside expressions: here we can’t expand into multiple statements,
+     so we just rebuild recursively. *)
+  and ds_expr (e : pexpr) : pexpr =
+    let d = e.pexpr_desc in
+    let d' =
+      match d with
+      | PEskip | PEnil | PEconstant _ | PEident _ -> d
+
+      | PEunop (op, a) -> PEunop (op, ds_expr a)
+      | PEbinop (op, a, b) -> PEbinop (op, ds_expr a, ds_expr b)
+
+      | PEcall (f, args) -> PEcall (f, List.map ds_expr args)
+
+      | PEdot (a, fld) -> PEdot (ds_expr a, fld)
+
+      | PEassign (lhs, rhs) ->
+          PEassign (List.map ds_expr lhs, List.map ds_expr rhs)
+
+      | PEvars (ids, typ_opt, vals) ->
+          (* NOTE: do not split here; splitting happens in ds_stmt within blocks. *)
+          PEvars (ids, typ_opt, List.map ds_expr vals)
+
+      | PEif (c, t, f) -> PEif (ds_expr c, ds_expr t, ds_expr f)
+
+      | PEreturn rs -> PEreturn (List.map ds_expr rs)
+
+      | PEblock es -> PEblock (ds_stmt_list es)
+
+      | PEfor (c, body) -> PEfor (ds_expr c, ds_expr body)
+
+      | PEincdec (x, op) -> PEincdec (ds_expr x, op)
+    in
+    { e with pexpr_desc = d' }
+
+  (* Entry point for a function body *)
+  let desugar_body (body : pexpr) : pexpr =
+    ds_expr body
+end
+
 module Util = struct
 
   let rec typ_of_ptyp (decls : tfile) (pt : ptyp) : typ t =
@@ -127,10 +225,6 @@ module Func = struct
       match find_dup_param func.pf_params with
           | Some ident -> report Duplicate_params ident.loc
           | None -> (
-    (* Check if a parameter is called _ and report errror *)
-    if List.find_opt (fun (ident, _) -> ident.id = "_") func.pf_params <> None then
-      report Underscore_as_param func.pf_name.loc
-    else
     let open Util in
     
     let loc = func.pf_name.loc in
@@ -150,21 +244,44 @@ module Func = struct
 
   let gen_body (fn_sig : function_) (decls : tfile) (func : pfunc) : expr t =
     let open Util in
+    let open Desugar in
 
     let ret_typ = typ_of_typ_list fn_sig.fn_typ in
+    let compatible_param_arg (p:typ) (a:typ) = a == p || (a == Tnil && Util.is_nilable p) in 
+
+    let get_multi_returns (te:expr) : typ list option =
+      match te.expr_typ with
+      | Tmany rets when List.length rets >= 2 -> Some rets
+      | _ -> None in 
 
     let mk e t = return { expr_desc = e; expr_typ = t } in
 
     let init_ctx = List.map (fun v -> (v.v_name, v)) fn_sig.fn_params in
 
-    let rec gen_exprs ctx (es : pexpr list) : expr list Error.t =
+    let rec gen_exprs ctx (es : pexpr list) gen : expr list Error.t =
       List.fold_right
         (fun e acc ->
           let* tes = acc <?> dummy_err in
-          let* te  = gen_expr ctx e <?> dummy_err in
+          let* te  = gen ctx e <?> dummy_err in
           return (te :: tes))
         es (return [])
+    and lvalue (ctx : (string * var) list) (e : pexpr) : expr t = 
+      match e.pexpr_desc with 
+      | PEident p when p.id = "_" ->
+        mk (TEident (new_var "_" p.loc (Tmany []))) (Tmany [])
 
+      | PEident _ -> gen_expr ctx e
+      | PEunop (Ustar, e') ->
+        if e'.pexpr_desc = PEnil then report Nil_Deref e.pexpr_loc
+        else
+          let* te = gen_expr ctx e' <?> (Lvalues, e.pexpr_loc) in
+          (match te.expr_typ with
+           | Tptr t -> mk (TEunop (Ustar, te)) t
+           | _ -> report Lvalues e.pexpr_loc)
+      | PEdot (e', ident) ->
+        let* te' = lvalue ctx e' <?> (Lvalues, e.pexpr_loc) in 
+          gen_expr ctx e
+      | _ -> report Lvalues e.pexpr_loc
     and gen_expr (ctx : (string * var) list) (e : pexpr) : expr t =
       match e.pexpr_desc with
 
@@ -175,14 +292,19 @@ module Func = struct
       | PEconstant (Cbool   _ as c) -> mk (TEconstant c) Tbool
       | PEconstant (Cint    _ as c) -> mk (TEconstant c) Tint
       | PEconstant (Cstring _ as c) -> mk (TEconstant c) Tstring
-
-      | PEident ident ->
+      | PEident ident when ident.id <> "_" ->
+          let* v = fetch_var_from_ctx ident.id ctx <?> (Ident, ident.loc) in
+          v.v_used <- true;
+          mk (TEident v) v.v_typ
+      | PEident ident when ident.id = "_" ->
+          report Underscore ident.loc
+      | PEident ident->
           let* v = fetch_var_from_ctx ident.id ctx <?> (Ident, ident.loc) in
           v.v_used <- true;
           mk (TEident v) v.v_typ
 
       | PEbinop (bop, e1, e2) -> gen_binop ctx bop e1 e2
-
+      | PEunop (Ustar, _) -> lvalue ctx e
       | PEunop (uop, e) -> gen_unop ctx uop e
 
       | PEcall (ident, args) -> gen_call ctx ident args
@@ -205,80 +327,137 @@ module Func = struct
            | _ -> report Dot e.pexpr_loc)
 
       | PEassign (lhss, rhss) ->
-          let* t_lvalues = gen_exprs ctx lhss <?> (Lvalues, e.pexpr_loc) in
-          let* t_rvalues = gen_exprs ctx rhss <?> (Rvalues, e.pexpr_loc) in
-          if
-            List.length t_lvalues = List.length t_rvalues &&
+          let* t_lvalues = gen_exprs ctx lhss lvalue <?> (Lvalues, e.pexpr_loc) in
+          let* t_rvalues = gen_exprs ctx rhss gen_expr <?> (Rvalues, e.pexpr_loc) in
+
+          let lhs_tys = List.map (fun lv -> lv.expr_typ) t_lvalues in
+
+          let ok =
+            (* Case A: normal parallel assignment x1,..,xn = y1,..,yn *)
+            if List.length t_lvalues = List.length t_rvalues then
               List.for_all2
-                (fun lval rval ->
-                  lval.expr_typ == rval.expr_typ ||
-                    (* We shouldn't forget that we can find statements such as
-                       'ptr = nil'. *)
-                    (is_nilable lval.expr_typ && rval.expr_typ == Tnil))
+                (fun lval rval -> compatible_param_arg lval.expr_typ rval.expr_typ)
                 t_lvalues t_rvalues
-          then mk (TEassign (t_lvalues, t_rvalues)) (Tmany [])
+            else
+              (* Case B: expansion assignment x1,..,xn = g() where g() returns n values (n>=2) *)
+              match t_rvalues with
+              | [single] ->
+                  (match get_multi_returns single with
+                  | Some rets ->
+                      List.length rets = List.length lhs_tys
+                      && List.for_all2 compatible_param_arg lhs_tys rets
+                  | None -> false)
+              | _ -> false
+          in
+
+          if ok then mk (TEassign (t_lvalues, t_rvalues)) (Tmany [])
           else report Assignments e.pexpr_loc
 
       | PEvars (idents, typ_opt, vals) ->
-          let* t_vals = gen_exprs ctx vals <?> (Rvalues, e.pexpr_loc) in
-          if List.length idents <> List.length t_vals
-          then report Arity e.pexpr_loc
-          else begin
+          let* t_vals = gen_exprs ctx vals gen_expr <?> (Rvalues, e.pexpr_loc) in
+          begin
             match typ_opt with
-            | Some ptyp ->
-                let* typ =
-                  typ_of_ptyp decls ptyp <?> (Unknown_typ, e.pexpr_loc)
-                in
-                if
-                  List.for_all
-                    (fun t_val ->
-                      t_val.expr_typ == typ ||
-                        (* We shouldn't forget that we can find statements such
-                           as 'var ptr = nil' *)
-                        (t_val.expr_typ == Tnil && is_nilable typ))
-                    t_vals
-                then
-                  let t_vars =
-                    List.map
-                      (fun ident -> new_var ident.id ident.loc typ)
-                      idents
-                  in
-                  mk (TEvars t_vars) (Tmany [])
-                else report Var e.pexpr_loc
-            | None ->
-                match (List.find_opt (fun v-> v.pexpr_desc = PEnil) vals) with
-                | Some v -> report Untyped_Nil_init v.pexpr_loc
-                | None ->
-                let t_vars =
-                  List.map2
-                    (fun ident t_val ->
-                      new_var ident.id ident.loc t_val.expr_typ)
-                    idents t_vals
-                in
-                mk (TEvars t_vars) (Tmany [])
-          end
-          
-      | PEif (cond, e1, e2) ->
-          let* t_cond = gen_expr ctx cond <?> (Cond, cond.pexpr_loc) in               
-          if not (t_cond.expr_typ == Tbool) then report Cond cond.pexpr_loc
+      | Some ptyp ->
+          let* typ =
+            typ_of_ptyp decls ptyp <?> (Unknown_typ, e.pexpr_loc)
+          in
+
+          let n = List.length idents in
+
+          let ok =
+            match t_vals with
+            | [] ->
+                true
+
+            (* normal init: var x,y T = e1,e2 *)
+            | _ when List.length t_vals = n ->
+                List.for_all (fun tv -> compatible_param_arg typ tv.expr_typ) t_vals
+
+            (* multi-return init: var x,y T = g() where g returns (T,T) *)
+            | [single] ->
+                (match get_multi_returns single with
+                | Some rets ->
+                    List.length rets = n
+                    && List.for_all (fun rt -> compatible_param_arg typ rt) rets
+                | None -> false)
+
+            | _ -> false
+          in
+
+          if not ok then report Var e.pexpr_loc
           else
-            let* t_e1 = gen_expr ctx e1 <?> (If_branch, e1.pexpr_loc)   in
-            let* t_e2 = gen_expr ctx e2 <?> (Else_branch, e2.pexpr_loc) in
-            begin
-              match find_return_typ t_e1, find_return_typ t_e2 with
-              | None, None -> mk (TEif (t_cond, t_e1, t_e2)) (Tmany [])
-              | Some t1, Some t2 when t1 == t2 ->
-                  mk (TEif (t_cond, t_e1, t_e2)) t1
-              (* If the conditional returns in the first branch and does not
-                 define the else branch, we shouldn't check branches typing
-                 constraints (because there are none). *)
-              | Some t, None when t_e2.expr_desc = TEskip ->
-                  mk (TEif (t_cond, t_e1, t_e2)) t
-              | _ -> report If e.pexpr_loc
+            let t_vars =
+              List.map (fun ident -> new_var ident.id ident.loc typ) idents
+            in
+            mk (TEvars (List.filter (fun v -> v.v_name <> "_") t_vars)) (Tmany [])
+
+      | None ->
+          let n = List.length idents in
+
+          let is_untyped_nil (te:expr) = (te.expr_typ == Tnil) in
+
+          (* Case A: normal inference var x1..xn = e1..en *)
+          let ok_normal =
+            List.length t_vals = n
+            && List.for_all (fun tv -> not (is_untyped_nil tv)) t_vals
+          in
+
+          (* Case B: multi-return inference var x1..xn = g() *)
+          let ok_expand, inferred_tys =
+            match t_vals with
+            | [single] ->
+                (match get_multi_returns single with
+                | Some rets when List.length rets = n ->
+                    (* forbid untyped nil in inferred types *)
+                    if List.exists (fun t -> t == Tnil) rets then (false, [])
+                    else (true, rets)
+                | _ -> (false, []))
+            | _ -> (false, [])
+          in
+
+          if ok_normal then
+            let t_vars =
+              List.map2
+                (fun ident t_val -> new_var ident.id ident.loc t_val.expr_typ)
+                idents t_vals
+            in
+            mk (TEvars t_vars) (Tmany [])
+          else if ok_expand then
+            let t_vars =
+              List.map2
+                (fun ident ty -> new_var ident.id ident.loc ty)
+                idents inferred_tys
+            in
+            mk (TEvars t_vars) (Tmany [])
+          else
+            if List.length t_vals <> n then report Arity e.pexpr_loc
+            else
+              match List.find_opt (fun v -> v.pexpr_desc = PEnil) vals with
+              | Some v -> report Untyped_Nil_init v.pexpr_loc
+              | None -> report Arity e.pexpr_loc
+                end
+                
+            | PEif (cond, e1, e2) ->
+                let* t_cond = gen_expr ctx cond <?> (Cond, cond.pexpr_loc) in               
+                if not (t_cond.expr_typ == Tbool) then report Cond cond.pexpr_loc
+                else
+                  let* t_e1 = gen_expr ctx e1 <?> (If_branch, e1.pexpr_loc)   in
+                  let* t_e2 = gen_expr ctx e2 <?> (Else_branch, e2.pexpr_loc) in
+                  begin
+                    match find_return_typ t_e1, find_return_typ t_e2 with
+                    | None, None -> mk (TEif (t_cond, t_e1, t_e2)) (Tmany [])
+                    | Some t1, Some t2 when t1 == t2 ->
+                        mk (TEif (t_cond, t_e1, t_e2)) t1
+                    (* If the conditional returns in the first branch and does not
+                      define the else branch, we shouldn't check branches typing
+                      constraints (because there are none). *)
+                    | Some t, None when t_e2.expr_desc = TEskip ->
+                        mk (TEif (t_cond, t_e1, t_e2)) t
+                    | _ -> report If e.pexpr_loc
             end
 
       | PEreturn exprs ->
-          let* t_exprs = gen_exprs ctx exprs <?> (Return, e.pexpr_loc) in
+          let* t_exprs = gen_exprs ctx exprs gen_expr <?> (Return, e.pexpr_loc) in
           if
             ret_typ ==
               (typ_of_typ_list
@@ -330,34 +509,60 @@ module Func = struct
           if te.expr_typ == Tint then mk (TEincdec (te, op)) Tint
           else report Incdec e.pexpr_loc
 
-    and gen_call ctx (ident : Ast.ident) (args : pexpr list) : expr t =
-      (* The parser generates a classic call expression when finding the new
-         keyword. So we should handle typechking of it differently from other
-         calls before the function's name resolution. *)
-      if ident.id = "new" then
-        match List.map (fun p -> p.pexpr_desc) args with
-        | [PEident pident] ->
-            let* typ = typ_of_string decls pident.id <?> (New, ident.loc) in
-            mk (TEnew typ) (Tptr typ)
-        | _ -> report New ident.loc
-      else
-      
-      let* (fn, _) = fetch_func_from_id decls ident.id <?> dummy_err in      
-      let* t_args  = gen_exprs ctx args <?> (Args, ident.loc) in
+  and gen_call (ctx : (string * var) list) (ident : Ast.ident) (args : pexpr list) : expr t =
+    (* The parser generates a classic call expression when finding the new
+      keyword. So we should handle typechking of it differently from other
+      calls before the function's name resolution. *)
+    if ident.id = "new" then
+      match List.map (fun p -> p.pexpr_desc) args with
+      | [PEident pident] ->
+          let* typ = typ_of_string decls pident.id <?> (New, ident.loc) in
+          mk (TEnew typ) (Tptr typ)
+      | _ -> report New ident.loc
+    else
 
-      if fn.fn_name = "fmt.Print" then (has_print := true; mk (TEprint t_args) (Tnil))
-      else if fn.fn_name = "main" then report Calling_main ident.loc
-      
-      else if List.length t_args <> List.length fn.fn_params then
-        report Arity ident.loc
+    let* (fn, _) = fetch_func_from_id decls ident.id <?> dummy_err in
+    let* t_args  = gen_exprs ctx args gen_expr <?> (Args, ident.loc) in
+
+    (* Builtins / special cases *)
+    if fn.fn_name = "fmt.Print" then
+      (has_print := true; mk (TEprint t_args) (Tmany []))
+    else if fn.fn_name = "main" then
+      report Calling_main ident.loc
+    else
+      let param_tys = List.map (fun p -> p.v_typ) fn.fn_params in
+
+      let compatible_param_arg (p:typ) (a:typ) =
+        a == p || (a == Tnil && Util.is_nilable p)
+      in
+
+      let tys_compatible (ps:typ list) (as_:typ list) =
+        List.length ps = List.length as_ &&
+        List.for_all2 compatible_param_arg ps as_
+      in
+
+      (* Case 1: normal call f(e1,...,en) *)
+      let ok_normal =
+        tys_compatible param_tys (List.map (fun a -> a.expr_typ) t_args)
+      in
+
+      (* Case 2: expansion call f(g()) where g() returns exactly n values *)
+     let ok_expand =
+      (match t_args with
+      | [single] ->
+          (match single.expr_typ with
+          | Tmany rets ->
+              (* IMPORTANT: only allow expansion for >= 2 returned values *)
+              List.length rets >= 2 && tys_compatible param_tys rets
+          | _ -> false)
+      | _ -> false)
+      in
+
+      if not (ok_normal || ok_expand) then
+        (* You can choose Arity vs Args, but Args is usually enough *)
+        report Args ident.loc
       else
-        let typs_ok =
-          List.for_all2
-            (fun te param -> te.expr_typ == param.v_typ || te.expr_typ == Tnil)
-            t_args fn.fn_params
-        in
-        if not typs_ok then report Args ident.loc
-        else mk (TEcall (fn, t_args)) (Util.typ_of_typ_list fn.fn_typ)
+        mk (TEcall (fn, t_args)) (Util.typ_of_typ_list fn.fn_typ)
 
     and gen_binop ctx bop e1 e2 : expr t =
       let* t1 = gen_expr ctx e1 <?> (Lhs, e1.pexpr_loc) in
@@ -409,23 +614,23 @@ module Func = struct
           | _ -> report Binop e1.pexpr_loc
 
     and gen_unop ctx uop e : expr t =
-      let* te = gen_expr ctx e <?> (Unop, e.pexpr_loc) in
       
       match uop with
        | Uneg  ->
+          let* te = gen_expr ctx e <?> (Unop, e.pexpr_loc) in
            if te.expr_typ == Tint  then mk (TEunop (Uneg,  te)) Tint
            else report Unop e.pexpr_loc
        | Unot  ->
+          let* te = gen_expr ctx e <?> (Unop, e.pexpr_loc) in
            if te.expr_typ == Tbool then mk (TEunop (Unot,  te)) Tbool
            else report Unop e.pexpr_loc
-       | Uamp  -> mk (TEunop (Uamp,  te)) (Tptr te.expr_typ)
-       | Ustar ->
-           match te.expr_typ with
-           | Tptr t -> mk (TEunop (Ustar, te)) t
-           | _      -> report Unop e.pexpr_loc
+       | Uamp  -> 
+          let* te = lvalue ctx e <?> (Lvalues, e.pexpr_loc) in
+          mk (TEunop (Uamp, te)) (Tptr te.expr_typ)
+       | Ustar -> report Unop e.pexpr_loc
     in
-
-    gen_expr init_ctx func.pf_body
+    let body = Desugar.desugar_body func.pf_body in
+    gen_expr init_ctx body
 
 end
 

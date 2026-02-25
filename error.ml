@@ -43,8 +43,9 @@ type err =
   | Duplicate_fields 
   | Duplicate_params
   | Untyped_Nil_init
-  | Underscore_as_param
+  | Underscore
   | Invalid_typ
+  | Nil_Deref
 
 type rep =
   | Rep of err * location * rep
