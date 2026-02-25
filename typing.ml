@@ -148,6 +148,12 @@ module Func = struct
     let open Util in
 
     let ret_typ = typ_of_typ_list fn_sig.fn_typ in
+    let compatible_param_arg (p:typ) (a:typ) = a == p || (a == Tnil && Util.is_nilable p) in 
+
+    let get_multi_returns (te:expr) : typ list option =
+      match te.expr_typ with
+      | Tmany rets when List.length rets >= 2 -> Some rets
+      | _ -> None in 
 
     let mk e t = return { expr_desc = e; expr_typ = t } in
 
@@ -224,16 +230,28 @@ module Func = struct
       | PEassign (lhss, rhss) ->
           let* t_lvalues = gen_exprs ctx lhss lvalue <?> (Lvalues, e.pexpr_loc) in
           let* t_rvalues = gen_exprs ctx rhss gen_expr <?> (Rvalues, e.pexpr_loc) in
-          if
-            List.length t_lvalues = List.length t_rvalues &&
+
+          let lhs_tys = List.map (fun lv -> lv.expr_typ) t_lvalues in
+
+          let ok =
+            (* Case A: normal parallel assignment x1,..,xn = y1,..,yn *)
+            if List.length t_lvalues = List.length t_rvalues then
               List.for_all2
-                (fun lval rval ->
-                  lval.expr_typ == rval.expr_typ ||
-                    (* We shouldn't forget that we can find statements such as
-                       'ptr = nil'. *)
-                    (is_nilable lval.expr_typ && rval.expr_typ == Tnil))
+                (fun lval rval -> compatible_param_arg lval.expr_typ rval.expr_typ)
                 t_lvalues t_rvalues
-          then mk (TEassign (t_lvalues, t_rvalues)) (Tmany [])
+            else
+              (* Case B: expansion assignment x1,..,xn = g() where g() returns n values (n>=2) *)
+              match t_rvalues with
+              | [single] ->
+                  (match get_multi_returns single with
+                  | Some rets ->
+                      List.length rets = List.length lhs_tys
+                      && List.for_all2 compatible_param_arg lhs_tys rets
+                  | None -> false)
+              | _ -> false
+          in
+
+          if ok then mk (TEassign (t_lvalues, t_rvalues)) (Tmany [])
           else report Assignments e.pexpr_loc
 
       | PEvars (idents, typ_opt, vals) ->
@@ -352,34 +370,60 @@ module Func = struct
           if te.expr_typ == Tint then mk (TEincdec (te, op)) Tint
           else report Incdec e.pexpr_loc
 
-    and gen_call ctx (ident : Ast.ident) (args : pexpr list) : expr t =
-      (* The parser generates a classic call expression when finding the new
-         keyword. So we should handle typechking of it differently from other
-         calls before the function's name resolution. *)
-      if ident.id = "new" then
-        match List.map (fun p -> p.pexpr_desc) args with
-        | [PEident pident] ->
-            let* typ = typ_of_string decls pident.id <?> (New, ident.loc) in
-            mk (TEnew typ) (Tptr typ)
-        | _ -> report New ident.loc
-      else
-      
-      let* (fn, _) = fetch_func_from_id decls ident.id <?> dummy_err in      
-      let* t_args  = gen_exprs ctx args gen_expr <?> (Args, ident.loc) in
+  and gen_call (ctx : (string * var) list) (ident : Ast.ident) (args : pexpr list) : expr t =
+    (* The parser generates a classic call expression when finding the new
+      keyword. So we should handle typechking of it differently from other
+      calls before the function's name resolution. *)
+    if ident.id = "new" then
+      match List.map (fun p -> p.pexpr_desc) args with
+      | [PEident pident] ->
+          let* typ = typ_of_string decls pident.id <?> (New, ident.loc) in
+          mk (TEnew typ) (Tptr typ)
+      | _ -> report New ident.loc
+    else
 
-      if fn.fn_name = "fmt.Print" then (has_print := true; mk (TEprint t_args) (Tmany []))
-      else if fn.fn_name = "main" then report Calling_main ident.loc
-      
-      else if List.length t_args <> List.length fn.fn_params then
-        report Arity ident.loc
+    let* (fn, _) = fetch_func_from_id decls ident.id <?> dummy_err in
+    let* t_args  = gen_exprs ctx args gen_expr <?> (Args, ident.loc) in
+
+    (* Builtins / special cases *)
+    if fn.fn_name = "fmt.Print" then
+      (has_print := true; mk (TEprint t_args) (Tmany []))
+    else if fn.fn_name = "main" then
+      report Calling_main ident.loc
+    else
+      let param_tys = List.map (fun p -> p.v_typ) fn.fn_params in
+
+      let compatible_param_arg (p:typ) (a:typ) =
+        a == p || (a == Tnil && Util.is_nilable p)
+      in
+
+      let tys_compatible (ps:typ list) (as_:typ list) =
+        List.length ps = List.length as_ &&
+        List.for_all2 compatible_param_arg ps as_
+      in
+
+      (* Case 1: normal call f(e1,...,en) *)
+      let ok_normal =
+        tys_compatible param_tys (List.map (fun a -> a.expr_typ) t_args)
+      in
+
+      (* Case 2: expansion call f(g()) where g() returns exactly n values *)
+     let ok_expand =
+      (match t_args with
+      | [single] ->
+          (match single.expr_typ with
+          | Tmany rets ->
+              (* IMPORTANT: only allow expansion for >= 2 returned values *)
+              List.length rets >= 2 && tys_compatible param_tys rets
+          | _ -> false)
+      | _ -> false)
+      in
+
+      if not (ok_normal || ok_expand) then
+        (* You can choose Arity vs Args, but Args is usually enough *)
+        report Args ident.loc
       else
-        let typs_ok =
-          List.for_all2
-            (fun te param -> te.expr_typ == param.v_typ || te.expr_typ == Tnil)
-            t_args fn.fn_params
-        in
-        if not typs_ok then report Args ident.loc
-        else mk (TEcall (fn, t_args)) (Util.typ_of_typ_list fn.fn_typ)
+        mk (TEcall (fn, t_args)) (Util.typ_of_typ_list fn.fn_typ)
 
     and gen_binop ctx bop e1 e2 : expr t =
       let* t1 = gen_expr ctx e1 <?> (Lhs, e1.pexpr_loc) in
