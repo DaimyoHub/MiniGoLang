@@ -691,15 +691,45 @@ let file ~debug:b (imp, dl : Ast.pfile) : Tast.tfile =
   let main_defined = ref false in
   List.iter
     (function
-     | PDstruct _ -> ()
-     | PDfunction pf ->
-           match Func.gen_signature !tfile pf with
-           | Error rep -> raise (Err (pf.pf_name.loc, rep))
-           | Ok fn_sig -> if pf.pf_name.id = "main" 
-               then (main_defined := true; if fn_sig.fn_typ <> [] || fn_sig.fn_params <> [] then raise (Err (pf.pf_name.loc, Rep (Main_non_void, pf.pf_name.loc, Nil))));
-               match Func.gen_body fn_sig !tfile pf with
-               | Error rep -> raise (Err (pf.pf_name.loc, rep))
-               | Ok body -> tfile := TDfunction (fn_sig, body) :: !tfile)
+    | PDstruct _ -> ()
+    | PDfunction pf ->
+       begin
+        match Func.gen_signature !tfile pf with
+        | Error rep -> raise (Err (pf.pf_name.loc, rep))
+        | Ok fn_sig ->
+           begin
+            (* We must make this currently analyzed function's signature available
+               to the user to allow recursive calls. *)
+            tfile :=
+              TDfunction
+                ( fn_sig,
+                  { expr_typ = Tnil; expr_desc = TEskip } )
+              :: !tfile;
+           
+            if pf.pf_name.id = "main" then
+             begin
+              main_defined := true;
+              
+              if fn_sig.fn_typ <> [] || fn_sig.fn_params <> [] then
+                raise (Err (pf.pf_name.loc, Rep (Main_non_void, pf.pf_name.loc, Nil)));
+             end;
+             
+            match Func.gen_body fn_sig !tfile pf with
+            | Error rep -> raise (Err (pf.pf_name.loc, rep))
+            | Ok body ->
+                (* Then because of the proactive adding of the currently analyzed
+                   function into the context, we must replace it with the full
+                   version once its body has been typechecked.. *)
+                tfile :=
+                  List.map
+                    (fun x ->
+                      match x with
+                      | TDfunction (s, _) ->
+                          if s = fn_sig then TDfunction (s, body) else x
+                      | x -> x)
+                    !tfile
+           end
+       end)
     dl;
 
   if not !main_defined then
