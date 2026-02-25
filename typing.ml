@@ -367,7 +367,7 @@ module Func = struct
       let* (fn, _) = fetch_func_from_id decls ident.id <?> dummy_err in      
       let* t_args  = gen_exprs ctx args gen_expr <?> (Args, ident.loc) in
 
-      if fn.fn_name = "fmt.Print" then (has_print := true; mk (TEprint t_args) (Tnil))
+      if fn.fn_name = "fmt.Print" then (has_print := true; mk (TEprint t_args) (Tmany []))
       else if fn.fn_name = "main" then report Calling_main ident.loc
       
       else if List.length t_args <> List.length fn.fn_params then
