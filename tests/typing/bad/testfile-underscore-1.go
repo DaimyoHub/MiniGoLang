@@ -1,3 +1,3 @@
 package main
-func f(_ int) int { return 0 }
+func f(_ int) int { return _ }
 func main() {}
