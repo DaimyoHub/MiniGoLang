@@ -127,10 +127,6 @@ module Func = struct
       match find_dup_param func.pf_params with
           | Some ident -> report Duplicate_params ident.loc
           | None -> (
-    (* Check if a parameter is called _ and report errror *)
-    if List.find_opt (fun (ident, _) -> ident.id = "_") func.pf_params <> None then
-      report Underscore_as_param func.pf_name.loc
-    else
     let open Util in
     
     let loc = func.pf_name.loc in
