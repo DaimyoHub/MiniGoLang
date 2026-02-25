@@ -162,6 +162,9 @@ module Func = struct
         es (return [])
     and lvalue (ctx : (string * var) list) (e : pexpr) : expr t = 
       match e.pexpr_desc with 
+      | PEident p when p.id = "_" ->
+        mk (TEident (new_var "_" p.loc (Tmany []))) (Tmany [])
+
       | PEident _ -> gen_expr ctx e
       | PEunop (Ustar, e') ->
         if e'.pexpr_desc = PEnil then report Nil_Deref e.pexpr_loc
@@ -184,8 +187,13 @@ module Func = struct
       | PEconstant (Cbool   _ as c) -> mk (TEconstant c) Tbool
       | PEconstant (Cint    _ as c) -> mk (TEconstant c) Tint
       | PEconstant (Cstring _ as c) -> mk (TEconstant c) Tstring
-
-      | PEident ident ->
+      | PEident ident when ident.id <> "_" ->
+          let* v = fetch_var_from_ctx ident.id ctx <?> (Ident, ident.loc) in
+          v.v_used <- true;
+          mk (TEident v) v.v_typ
+      | PEident ident when ident.id = "_" ->
+          report Underscore ident.loc
+      | PEident ident->
           let* v = fetch_var_from_ctx ident.id ctx <?> (Ident, ident.loc) in
           v.v_used <- true;
           mk (TEident v) v.v_typ
@@ -259,16 +267,16 @@ module Func = struct
                 if List.length idents <> List.length t_vals 
                 then report Arity e.pexpr_loc
                 else
-                match (List.find_opt (fun v-> v.pexpr_desc = PEnil) vals) with
-                | Some v -> report Untyped_Nil_init v.pexpr_loc
-                | None ->
-                let t_vars =
-                  List.map2
-                    (fun ident t_val ->
-                      new_var ident.id ident.loc t_val.expr_typ)
-                    idents t_vals
-                in
-                mk (TEvars (List.filter (fun v -> v.v_name <> "_") t_vars)) (Tmany [])
+                  (match (List.find_opt (fun v-> v.pexpr_desc = PEnil) vals) with
+                  | Some v -> report Untyped_Nil_init v.pexpr_loc
+                  | None ->
+                      let t_vars =
+                        List.map2
+                          (fun ident t_val ->
+                            new_var ident.id ident.loc t_val.expr_typ)
+                          idents t_vals
+                      in
+                      mk (TEvars t_vars) (Tmany []))
                 (* TODO: add assgn *)
           end
           

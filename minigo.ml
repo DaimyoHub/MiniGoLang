@@ -108,7 +108,7 @@ let string_of_err = function
   | Duplicate_fields  -> "Duplicate field names in struct definition."
   | Duplicate_params  -> "Duplicate parameter names in function definition."
   | Untyped_Nil_init -> "Nil initialization must have an explicit type."
-  | Underscore_as_param -> "Underscore cannot be used as a parameter name."
+  | Underscore       -> "Underscore cannot be used as Rvalue."
   | New              -> "New expression is ill typed."
   | Invalid_typ      -> "Found an invalid type."
   | Nil_Deref        -> "Cannot dereference a nil pointer."
