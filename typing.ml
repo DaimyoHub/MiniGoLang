@@ -661,6 +661,14 @@ let file ~debug:b (imp, dl : Ast.pfile) : Tast.tfile =
          let ofs = ref 0 in
          let fields =
            List.map (fun (fid, ftyp) ->
+             (* We should not allow recursive definition of structures. *)
+             let () =
+               match ftyp with
+               | PTident ident ->
+                   if ident.id = strc.s_name then
+                     raise (Err (ps.ps_name.loc, Rep (Recursive_struct, ident.loc, Nil)))
+               | _ -> ()
+             in        
              match Util.typ_of_ptyp !tfile ftyp with
              | Error rep -> raise (Err (fid.loc, rep))
              | Ok ft ->

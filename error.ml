@@ -46,6 +46,7 @@ type err =
   | Underscore
   | Invalid_typ
   | Nil_Deref
+  | Recursive_struct
 
 type rep =
   | Rep of err * location * rep

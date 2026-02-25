@@ -105,13 +105,14 @@ let string_of_err = function
   | Dot              -> "Dot expression is ill typed."
   | Import_not_used  -> "Imported package is not used."
   | Main_non_void    -> "The 'main' function must have no return type and no arguments."
-  | Duplicate_fields  -> "Duplicate field names in struct definition."
-  | Duplicate_params  -> "Duplicate parameter names in function definition."
+  | Duplicate_fields -> "Duplicate field names in struct definition."
+  | Duplicate_params -> "Duplicate parameter names in function definition."
   | Untyped_Nil_init -> "Nil initialization must have an explicit type."
   | Underscore       -> "Underscore cannot be used as Rvalue."
   | New              -> "New expression is ill typed."
   | Invalid_typ      -> "Found an invalid type."
   | Nil_Deref        -> "Cannot dereference a nil pointer."
+  | Recursive_struct -> "Recursive structure definition."
   | Dummy            -> ""
 
 let string_of_loc (loc : Ast.location) : string =
