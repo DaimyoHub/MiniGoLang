@@ -247,7 +247,7 @@ module Func = struct
     let open Desugar in
 
     let ret_typ = typ_of_typ_list fn_sig.fn_typ in
-    let compatible_param_arg (p:typ) (a:typ) = a == p || (a == Tnil && Util.is_nilable p) in 
+    let compatible_param_arg (p:typ) (a:typ) = a == p || (a == Tnil && is_nilable p) in 
 
     let get_multi_returns (te:expr) : typ list option =
       match te.expr_typ with
@@ -327,7 +327,7 @@ module Func = struct
            | _ -> report Dot e.pexpr_loc)
 
       | PEassign (lhss, rhss) ->
-          let* t_lvalues = gen_exprs ctx lhss lvalue <?> (Lvalues, e.pexpr_loc) in
+          let* t_lvalues = gen_exprs ctx lhss lvalue   <?> (Lvalues, e.pexpr_loc) in
           let* t_rvalues = gen_exprs ctx rhss gen_expr <?> (Rvalues, e.pexpr_loc) in
 
           let lhs_tys = List.map (fun lv -> lv.expr_typ) t_lvalues in
@@ -657,7 +657,7 @@ let file ~debug:b (imp, dl : Ast.pfile) : Tast.tfile =
          then raise (Err (ps.ps_name.loc, Rep (Several_structs, ps.ps_name.loc, Nil)))
          else ()
          );
-         tfile := !tfile @ [TDstruct strc];
+         tfile := TDstruct strc :: !tfile;
          let ofs = ref 0 in
          let fields =
            List.map (fun (fid, ftyp) ->
@@ -733,7 +733,9 @@ let file ~debug:b (imp, dl : Ast.pfile) : Tast.tfile =
                     (fun x ->
                       match x with
                       | TDfunction (s, _) ->
-                          if s = fn_sig then TDfunction (s, body) else x
+                          (* The condition works as far as functions have a unique
+                             name *)
+                          if s.fn_name = fn_sig.fn_name then TDfunction (s, body) else x
                       | x -> x)
                     !tfile
            end
