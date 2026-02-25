@@ -221,11 +221,12 @@ module Func = struct
 
       | PEvars (idents, typ_opt, vals) ->
           let* t_vals = gen_exprs ctx vals <?> (Rvalues, e.pexpr_loc) in
-          if List.length idents <> List.length t_vals
-          then report Arity e.pexpr_loc
-          else begin
+          begin
             match typ_opt with
             | Some ptyp ->
+                if List.length idents <> List.length t_vals && List.length t_vals <> 0
+                then report Arity e.pexpr_loc
+                else 
                 let* typ =
                   typ_of_ptyp decls ptyp <?> (Unknown_typ, e.pexpr_loc)
                 in
@@ -243,9 +244,12 @@ module Func = struct
                       (fun ident -> new_var ident.id ident.loc typ)
                       idents
                   in
-                  mk (TEvars t_vars) (Tmany [])
+                  mk (TEvars (List.filter (fun v -> v.v_name <> "_") t_vars)) (Tmany [])
                 else report Var e.pexpr_loc
             | None ->
+                if List.length idents <> List.length t_vals 
+                then report Arity e.pexpr_loc
+                else
                 match (List.find_opt (fun v-> v.pexpr_desc = PEnil) vals) with
                 | Some v -> report Untyped_Nil_init v.pexpr_loc
                 | None ->
@@ -255,7 +259,8 @@ module Func = struct
                       new_var ident.id ident.loc t_val.expr_typ)
                     idents t_vals
                 in
-                mk (TEvars t_vars) (Tmany [])
+                mk (TEvars (List.filter (fun v -> v.v_name <> "_") t_vars)) (Tmany [])
+                (* TODO: add assgn *)
           end
           
       | PEif (cond, e1, e2) ->
@@ -418,7 +423,8 @@ module Func = struct
        | Unot  ->
            if te.expr_typ == Tbool then mk (TEunop (Unot,  te)) Tbool
            else report Unop e.pexpr_loc
-       | Uamp  -> mk (TEunop (Uamp,  te)) (Tptr te.expr_typ)
+       | Uamp  -> (match te.expr_desc with | TEident _ | TEdot _ -> mk (TEunop (Uamp,  te)) (Tptr te.expr_typ)
+                                           | _ -> report Unop e.pexpr_loc)
        | Ustar ->
            match te.expr_typ with
            | Tptr t -> mk (TEunop (Ustar, te)) t
