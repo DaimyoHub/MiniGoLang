@@ -641,48 +641,92 @@ let file ~debug:b (imp, dl : Ast.pfile) : Tast.tfile =
 
   let tfile = ref [] in
   (* We first generate structures' typed declarations *)
+    
+  (* As for recursive calls, we first add every structure to the context. *)
+  let pstructs =
+    List.filter_map
+      (function
+      | PDstruct ps ->
+          let strc : structure =
+            { s_name   = ps.ps_name.id;
+              s_fields = Hashtbl.create 4;
+              s_list   = [];
+              s_size   = 0 }
+          in
+          if
+            List.exists
+              (fun td ->
+                match td with
+                | TDstruct s when s.s_name = ps.ps_name.id -> true
+                | _ -> false)
+              !tfile
+          then
+            raise (Err (ps.ps_name.loc, Rep (Several_structs, ps.ps_name.loc, Nil)))
+          else ();
+          tfile := TDstruct strc :: !tfile;
+          Some (ps, strc)
+      | PDfunction _ -> None)
+      dl
+  in
+
+  (* Then we fill them up with their typed fields. *)
   List.iter
-    (function
-     | PDstruct ps ->
-         let strc : structure =
-           { s_name   = ps.ps_name.id;
-             s_fields = Hashtbl.create 4;
-             s_list   = [];
-             s_size   = 0 }
-         in (if List.exists (fun td ->
-           match td with
-           | TDstruct s when s.s_name = ps.ps_name.id -> true
-           | _ -> false)
-           !tfile
-         then raise (Err (ps.ps_name.loc, Rep (Several_structs, ps.ps_name.loc, Nil)))
-         else ()
-         );
-         tfile := TDstruct strc :: !tfile;
-         let ofs = ref 0 in
-         let fields =
-           List.map (fun (fid, ftyp) ->
-             (* We should not allow recursive definition of structures. *)
-             let () =
-               match ftyp with
-               | PTident ident ->
-                   if ident.id = strc.s_name then
-                     raise (Err (ps.ps_name.loc, Rep (Recursive_struct, ident.loc, Nil)))
-               | _ -> ()
-             in        
-             match Util.typ_of_ptyp !tfile ftyp with
-             | Error rep -> raise (Err (fid.loc, rep))
-             | Ok ft ->
-                 let f = { f_name = fid.id; f_typ = ft; f_ofs = !ofs } in
-                 ofs := !ofs + 8;
-                 if (Hashtbl.mem strc.s_fields fid.id) then raise (Err (fid.loc, Rep (Duplicate_fields, fid.loc, Nil)))
-                 else Hashtbl.add strc.s_fields fid.id f;
-                 f)
-           ps.ps_fields
-         in
-         strc.s_list <- fields;
-         strc.s_size <- !ofs
-     | PDfunction _ -> ())
-    dl;
+    (fun (ps, strc) ->
+      let ofs = ref 0 in
+      let fields =
+        List.map
+          (fun (fid, ftyp) ->
+            match Util.typ_of_ptyp !tfile ftyp with
+            | Error rep -> raise (Err (fid.loc, rep))
+            | Ok ft ->
+                let f = { f_name = fid.id; f_typ = ft; f_ofs = !ofs } in
+                ofs := !ofs + 8;
+                
+            if Hashtbl.mem strc.s_fields fid.id then
+              raise (Err (fid.loc, Rep (Duplicate_fields, fid.loc, Nil)))
+            else
+              Hashtbl.add strc.s_fields fid.id f;
+            f)
+          ps.ps_fields
+      in
+      strc.s_list <- fields;
+      strc.s_size <- !ofs)  
+    pstructs;
+
+  (* And we finally check that there are no cycled dependencies including no
+     indirections *)
+  let rec check_cycles strc visited ftyp floc =
+    match ftyp with
+    (* If the field's type is a pointer, it never induces an illegal cycle so
+       we can stop the recursive analysis there. *)
+    | PTptr _ -> ()
+    | PTident ident ->
+        (* If the field's type is exactly it's containing structure, this is
+           always illegal since it is a kind of trivial cycle so we report it. *)
+        if ident.id = strc.s_name then
+          raise (Err (floc, Rep (Recursive_struct, ident.loc, Nil)))
+        (* If the field's type does not induce any cycle so far, we can stop
+           the recursive analysis there. *)
+        else if List.mem ident.id visited then ()
+        else
+         begin
+          (* Otherwrise, we recursively analyze cycles induced by the current
+             field's type *)
+          match List.find_opt (fun (ps, _) -> ps.ps_name.id = ident.id) pstructs with
+          | None -> ()
+          | Some (ps, _) ->
+              List.iter
+                (fun (fid, ftyp') ->
+                  check_cycles strc (ident.id :: visited) ftyp' fid.loc)
+                ps.ps_fields
+         end
+  in
+  List.iter
+    (fun (ps, strc) ->
+      List.iter
+        (fun (fid, ftyp) -> check_cycles strc [strc.s_name] ftyp fid.loc)
+        ps.ps_fields)
+    pstructs;
 
   (* Then we generate functions' associated typed ASTs and signatures *)
   if imp then begin
