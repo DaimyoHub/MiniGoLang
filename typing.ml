@@ -466,31 +466,37 @@ module Func = struct
           else report Return e.pexpr_loc
 
       | PEblock exprs ->
-          (* I report a dummy error to not flood the full error report. Blocks
-             are used in every statements and it doesn't help to know that some
-             of it is ill typed. *)
-          let rec gen_block ctx acc = function
+          let rec gen_block ctx local_start acc = function
             | [] ->
+               begin
                 let t_exprs = List.rev acc in
                 let t_ret =
                   match List.find_map find_return_typ t_exprs with
                   | Some t -> t
                   | None -> Tmany []
                 in
-                mk (TEblock t_exprs) t_ret
+
+                (* We check that every local variable of the block has been used
+                   at least once. *)
+                let local_vars =
+                  (* I don't like that be it works *)
+                  List.filteri (fun i _ -> i < List.length ctx - local_start) ctx
+                in
+                match List.filter (fun (s, v) -> not v.v_used && s <> "_") local_vars with
+                | (_, v) :: _ -> report Unused_var v.v_loc
+                | _ -> mk (TEblock t_exprs) t_ret
+               end
             | e :: rest ->
                 let* te = gen_expr ctx e <?> dummy_err in
-                (* We mustn't forget that each time with declare a variable it
-                   should be added to the current's block context. *)
                 let ctx' =
                   match te.expr_desc with
                   | TEvars vars ->
                       List.fold_left (fun ctx v -> (v.v_name, v) :: ctx) ctx vars
                   | _ -> ctx
                 in
-                gen_block ctx' (te :: acc) rest
+                gen_block ctx' local_start (te :: acc) rest
           in
-          gen_block ctx [] exprs
+          gen_block ctx (List.length ctx) [] exprs
 
       | PEfor (cond, body) ->
           let* t_cond = gen_expr ctx cond <?> (Cond, cond.pexpr_loc) in

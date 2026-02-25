@@ -113,6 +113,7 @@ let string_of_err = function
   | Invalid_typ      -> "Found an invalid type."
   | Nil_Deref        -> "Cannot dereference a nil pointer."
   | Recursive_struct -> "Recursive structure definition."
+  | Unused_var       -> "Variable has been initialized but not used."
   | Dummy            -> ""
 
 let string_of_loc (loc : Ast.location) : string =
