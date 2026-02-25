@@ -157,14 +157,27 @@ module Func = struct
 
     let init_ctx = List.map (fun v -> (v.v_name, v)) fn_sig.fn_params in
 
-    let rec gen_exprs ctx (es : pexpr list) : expr list Error.t =
+    let rec gen_exprs ctx (es : pexpr list) gen : expr list Error.t =
       List.fold_right
         (fun e acc ->
           let* tes = acc <?> dummy_err in
-          let* te  = gen_expr ctx e <?> dummy_err in
+          let* te  = gen ctx e <?> dummy_err in
           return (te :: tes))
         es (return [])
-
+    and lvalue (ctx : (string * var) list) (e : pexpr) : expr t = 
+      match e.pexpr_desc with 
+      | PEident _ -> gen_expr ctx e
+      | PEunop (Ustar, e') ->
+        if e'.pexpr_desc = PEnil then report Nil_Deref e.pexpr_loc
+        else
+          let* te = gen_expr ctx e' <?> (Lvalues, e.pexpr_loc) in
+          (match te.expr_typ with
+           | Tptr t -> mk (TEunop (Ustar, te)) t
+           | _ -> report Lvalues e.pexpr_loc)
+      | PEdot (e', ident) ->
+        let* te' = lvalue ctx e' <?> (Lvalues, e.pexpr_loc) in 
+          gen_expr ctx e
+      | _ -> report Lvalues e.pexpr_loc
     and gen_expr (ctx : (string * var) list) (e : pexpr) : expr t =
       match e.pexpr_desc with
 
@@ -182,7 +195,7 @@ module Func = struct
           mk (TEident v) v.v_typ
 
       | PEbinop (bop, e1, e2) -> gen_binop ctx bop e1 e2
-
+      | PEunop (Ustar, _) -> lvalue ctx e
       | PEunop (uop, e) -> gen_unop ctx uop e
 
       | PEcall (ident, args) -> gen_call ctx ident args
@@ -205,8 +218,8 @@ module Func = struct
            | _ -> report Dot e.pexpr_loc)
 
       | PEassign (lhss, rhss) ->
-          let* t_lvalues = gen_exprs ctx lhss <?> (Lvalues, e.pexpr_loc) in
-          let* t_rvalues = gen_exprs ctx rhss <?> (Rvalues, e.pexpr_loc) in
+          let* t_lvalues = gen_exprs ctx lhss lvalue <?> (Lvalues, e.pexpr_loc) in
+          let* t_rvalues = gen_exprs ctx rhss gen_expr <?> (Rvalues, e.pexpr_loc) in
           if
             List.length t_lvalues = List.length t_rvalues &&
               List.for_all2
@@ -220,7 +233,7 @@ module Func = struct
           else report Assignments e.pexpr_loc
 
       | PEvars (idents, typ_opt, vals) ->
-          let* t_vals = gen_exprs ctx vals <?> (Rvalues, e.pexpr_loc) in
+          let* t_vals = gen_exprs ctx vals gen_expr <?> (Rvalues, e.pexpr_loc) in
           begin
             match typ_opt with
             | Some ptyp ->
@@ -283,7 +296,7 @@ module Func = struct
             end
 
       | PEreturn exprs ->
-          let* t_exprs = gen_exprs ctx exprs <?> (Return, e.pexpr_loc) in
+          let* t_exprs = gen_exprs ctx exprs gen_expr <?> (Return, e.pexpr_loc) in
           if
             ret_typ ==
               (typ_of_typ_list
@@ -348,7 +361,7 @@ module Func = struct
       else
       
       let* (fn, _) = fetch_func_from_id decls ident.id <?> dummy_err in      
-      let* t_args  = gen_exprs ctx args <?> (Args, ident.loc) in
+      let* t_args  = gen_exprs ctx args gen_expr <?> (Args, ident.loc) in
 
       if fn.fn_name = "fmt.Print" then (has_print := true; mk (TEprint t_args) (Tnil))
       else if fn.fn_name = "main" then report Calling_main ident.loc
@@ -414,21 +427,20 @@ module Func = struct
           | _ -> report Binop e1.pexpr_loc
 
     and gen_unop ctx uop e : expr t =
-      let* te = gen_expr ctx e <?> (Unop, e.pexpr_loc) in
       
       match uop with
        | Uneg  ->
+          let* te = gen_expr ctx e <?> (Unop, e.pexpr_loc) in
            if te.expr_typ == Tint  then mk (TEunop (Uneg,  te)) Tint
            else report Unop e.pexpr_loc
        | Unot  ->
+          let* te = gen_expr ctx e <?> (Unop, e.pexpr_loc) in
            if te.expr_typ == Tbool then mk (TEunop (Unot,  te)) Tbool
            else report Unop e.pexpr_loc
-       | Uamp  -> (match te.expr_desc with | TEident _ | TEdot _ -> mk (TEunop (Uamp,  te)) (Tptr te.expr_typ)
-                                           | _ -> report Unop e.pexpr_loc)
-       | Ustar ->
-           match te.expr_typ with
-           | Tptr t -> mk (TEunop (Ustar, te)) t
-           | _      -> report Unop e.pexpr_loc
+       | Uamp  -> 
+          let* te = lvalue ctx e <?> (Lvalues, e.pexpr_loc) in
+          mk (TEunop (Uamp, te)) (Tptr te.expr_typ)
+       | Ustar -> report Unop e.pexpr_loc
     in
 
     gen_expr init_ctx func.pf_body

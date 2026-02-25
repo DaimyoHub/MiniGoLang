@@ -111,6 +111,7 @@ let string_of_err = function
   | Underscore_as_param -> "Underscore cannot be used as a parameter name."
   | New              -> "New expression is ill typed."
   | Invalid_typ      -> "Found an invalid type."
+  | Nil_Deref        -> "Cannot dereference a nil pointer."
   | Dummy            -> ""
 
 let string_of_loc (loc : Ast.location) : string =

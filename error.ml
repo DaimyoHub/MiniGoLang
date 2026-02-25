@@ -45,6 +45,7 @@ type err =
   | Untyped_Nil_init
   | Underscore_as_param
   | Invalid_typ
+  | Nil_Deref
 
 type rep =
   | Rep of err * location * rep
