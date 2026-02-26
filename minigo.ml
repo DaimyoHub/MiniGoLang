@@ -114,6 +114,10 @@ let string_of_err = function
   | Nil_Deref        -> "Cannot dereference a nil pointer."
   | Recursive_struct -> "Recursive structure definition."
   | Unused_var       -> "Variable has been initialized but not used."
+  | Expected_ret     -> "Expected a return value."
+  | Incorrect_ret    -> "Return value does not correspond to return type."
+  | Dead_code        -> "Found code after return instruction."
+  | Nil_eq           -> "Cannot check equality of two nil values."
   | Dummy            -> ""
 
 let string_of_loc (loc : Ast.location) : string =

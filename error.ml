@@ -28,6 +28,7 @@ type err =
   | Dot
   | Object
   | New
+  | Nil_eq
 
   | Func_not_found
   | Struct_not_found
@@ -48,6 +49,9 @@ type err =
   | Nil_Deref
   | Recursive_struct
   | Unused_var
+  | Expected_ret
+  | Incorrect_ret
+  | Dead_code
 
 type rep =
   | Rep of err * location * rep

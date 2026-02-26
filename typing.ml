@@ -164,6 +164,19 @@ module Util = struct
     | [t] -> t
     | ts  -> Tmany ts
 
+  
+  let rec find_return_typ (e : expr) : typ option =
+    match e.expr_desc with
+    | TEreturn _ -> Some e.expr_typ
+    | TEblock es -> List.find_map find_return_typ es
+    | TEif (_, e1, e2) ->
+       begin
+        match find_return_typ e1, find_return_typ e2 with
+        | Some t1, Some t2 when t1 == t2 -> Some t1
+        | _ -> None
+       end
+    | _ -> None
+
   let map_typs (decls : tfile) (pts : ptyp list) : typ list t =
     List.fold_right
       (fun pt acc ->
@@ -171,17 +184,6 @@ module Util = struct
         let* t  = typ_of_ptyp decls pt <?> dummy_err in
         return (t :: ts))
       pts (return [])
-
-  let rec find_return_typ (e : expr) : typ option =
-    match e.expr_desc with
-    | TEreturn _ -> Some e.expr_typ
-    | TEblock es -> List.find_map find_return_typ es
-    | TEif (_, e1, e2) ->
-        (match find_return_typ e1 with
-         | Some t -> Some t
-         | None -> find_return_typ e2)
-    | TEfor (_, body) -> find_return_typ body
-    | _ -> None
 
   let rec typ_of_string (decls : tfile) str =
     match str with
@@ -292,6 +294,7 @@ module Func = struct
       | PEconstant (Cbool   _ as c) -> mk (TEconstant c) Tbool
       | PEconstant (Cint    _ as c) -> mk (TEconstant c) Tint
       | PEconstant (Cstring _ as c) -> mk (TEconstant c) Tstring
+
       | PEident ident when ident.id <> "_" ->
           let* v = fetch_var_from_ctx ident.id ctx <?> (Ident, ident.loc) in
           v.v_used <- true;
@@ -437,23 +440,24 @@ module Func = struct
               | None -> report Arity e.pexpr_loc
                 end
                 
-            | PEif (cond, e1, e2) ->
-                let* t_cond = gen_expr ctx cond <?> (Cond, cond.pexpr_loc) in               
-                if not (t_cond.expr_typ == Tbool) then report Cond cond.pexpr_loc
-                else
-                  let* t_e1 = gen_expr ctx e1 <?> (If_branch, e1.pexpr_loc)   in
-                  let* t_e2 = gen_expr ctx e2 <?> (Else_branch, e2.pexpr_loc) in
-                  begin
-                    match find_return_typ t_e1, find_return_typ t_e2 with
-                    | None, None -> mk (TEif (t_cond, t_e1, t_e2)) (Tmany [])
-                    | Some t1, Some t2 when t1 == t2 ->
-                        mk (TEif (t_cond, t_e1, t_e2)) t1
-                    (* If the conditional returns in the first branch and does not
-                      define the else branch, we shouldn't check branches typing
-                      constraints (because there are none). *)
-                    | Some t, None when t_e2.expr_desc = TEskip ->
-                        mk (TEif (t_cond, t_e1, t_e2)) t
-                    | _ -> report If e.pexpr_loc
+      | PEif (cond, e1, e2) ->
+          let* t_cond = gen_expr ctx cond <?> (Cond, cond.pexpr_loc) in               
+          if not (t_cond.expr_typ == Tbool) then report Cond cond.pexpr_loc
+          else
+            let* t_e1 = gen_expr ctx e1 <?> (If_branch, e1.pexpr_loc)   in
+            let* t_e2 = gen_expr ctx e2 <?> (Else_branch, e2.pexpr_loc) in
+            
+            begin
+              match t_e1.expr_typ, t_e2.expr_typ with
+              | Tmany [], Tmany [] -> mk (TEif (t_cond, t_e1, t_e2)) (Tmany [])
+              | t, Tmany [] when t_e2.expr_desc = TEskip ->
+                  mk (TEif (t_cond, t_e1, t_e2)) (Tmany [])
+              | t1, t2 when t1 == t2 -> mk (TEif (t_cond, t_e1, t_e2)) t1
+              (* If the conditional returns in the first branch and does not
+                  define the else branch, we shouldn't check branches typing
+                  constraints (because there are none) and we consider that it
+                  returns nothing at all. *)
+              | _ -> report If e.pexpr_loc
             end
 
       | PEreturn exprs ->
@@ -465,55 +469,58 @@ module Func = struct
           then mk (TEreturn t_exprs) ret_typ
           else report Return e.pexpr_loc
 
-      | PEblock exprs ->
-          let rec gen_block ctx local_start acc = function
-            | [] ->
-               begin
-                let t_exprs = List.rev acc in
-                let t_ret =
-                  match List.find_map find_return_typ t_exprs with
-                  | Some t -> t
-                  | None -> Tmany []
-                in
-
-                (* We check that every local variable of the block has been used
-                   at least once. *)
-                let local_vars =
-                  (* I don't like that be it works *)
-                  List.filteri (fun i _ -> i < List.length ctx - local_start) ctx
-                in
-                match List.filter (fun (s, v) -> not v.v_used && s <> "_") local_vars with
-                | (_, v) :: _ -> report Unused_var v.v_loc
-                | _ -> mk (TEblock t_exprs) t_ret
-               end
-            | e :: rest ->
-                let* te = gen_expr ctx e <?> dummy_err in
-                let ctx' =
-                  match te.expr_desc with
-                  | TEvars vars ->
-                      List.fold_left (fun ctx v -> (v.v_name, v) :: ctx) ctx vars
-                  | _ -> ctx
-                in
-                gen_block ctx' local_start (te :: acc) rest
-          in
-          gen_block ctx (List.length ctx) [] exprs
+      | PEblock exprs -> gen_block ctx (List.length ctx) [] exprs
 
       | PEfor (cond, body) ->
           let* t_cond = gen_expr ctx cond <?> (Cond, cond.pexpr_loc) in
           if not (t_cond.expr_typ == Tbool) then report Cond cond.pexpr_loc
           else
             let* t_body = gen_expr ctx body <?> (For_branch, body.pexpr_loc) in
-            let t_ret = 
-              match find_return_typ t_body with
-              | None -> Tmany []
-              | Some typ -> typ
-            in
-            mk (TEfor (t_cond, t_body)) t_ret
+            mk (TEfor (t_cond, t_body)) t_body.expr_typ
 
       | PEincdec (e, op) ->
           let* te = gen_expr ctx e <?> (Incdec, e.pexpr_loc) in
           if te.expr_typ == Tint then mk (TEincdec (te, op)) Tint
           else report Incdec e.pexpr_loc
+
+      
+  and gen_block ctx local_start acc = function
+    | [] ->
+       begin
+        (* We compute the return type. This is not e.expr_typ because
+           the bloc might contain 'x++', which is not an instruction and
+           an expression at the same time. So we must filter these kinds
+           of expressions to be able to extract only return instructions. *)
+        let t_exprs = List.rev acc in
+        let t_ret =
+          match
+            Util.find_return_typ
+              { expr_desc = TEblock t_exprs; expr_typ = Tmany [] }
+          with
+          | None -> Tmany []
+          | Some t -> t
+        in
+                
+        (* We check that every local variable of the block has been used
+           at least once. *)
+        let local_vars =
+          (* I don't like that be it works *)
+          List.filteri (fun i _ -> i < List.length ctx - local_start) ctx
+        in
+        match List.filter (fun (s, v) -> not v.v_used && s <> "_") local_vars with
+        | (_, v) :: _ -> report Unused_var v.v_loc
+        | _ -> mk (TEblock t_exprs) t_ret
+       end
+
+    | e :: rest ->
+        let* te = gen_expr ctx e <?> dummy_err in
+        let ctx' =
+          match te.expr_desc with
+          | TEvars vars ->
+              List.fold_left (fun ctx v -> (v.v_name, v) :: ctx) ctx vars
+          | _ -> ctx
+        in
+        gen_block ctx' local_start (te :: acc) rest
 
   and gen_call (ctx : (string * var) list) (ident : Ast.ident) (args : pexpr list) : expr t =
     (* The parser generates a classic call expression when finding the new
@@ -586,10 +593,12 @@ module Func = struct
       (* Same as in Vars/Assign, we shouldn't forget that we can find
          expressions such as 'ptr == nil'. *)
       let cmp_eq () =               
-        if ty1 == ty2
+        if (ty1 == ty2)
           || (ty1 == Tnil && is_nilable ty2)
           || (ty2 == Tnil && is_nilable ty1)
-        then mk (TEbinop (bop, t1, t2)) Tbool
+        then
+          if not (ty1 == Tnil) then mk (TEbinop (bop, t1, t2)) Tbool
+          else report Nil_eq e1.pexpr_loc
         else report Binop e2.pexpr_loc
       in
       
@@ -775,6 +784,16 @@ let file ~debug:b (imp, dl : Ast.pfile) : Tast.tfile =
             match Func.gen_body fn_sig !tfile pf with
             | Error rep -> raise (Err (pf.pf_name.loc, rep))
             | Ok body ->
+                (* We check that the inferred return typ corresponds to the
+                   signature return type. *)
+                match Util.find_return_typ body with
+                | None ->
+                    if fn_sig.fn_typ = [] then ()
+                    else raise (Err (pf.pf_name.loc, Rep (Expected_ret, pf.pf_name.loc, Nil)))
+                | Some rtyp ->
+                    if rtyp == Util.typ_of_typ_list fn_sig.fn_typ then ()
+                    else raise (Err (pf.pf_name.loc, Rep (Incorrect_ret, pf.pf_name.loc, Nil)));
+                
                 (* Then because of the proactive adding of the currently analyzed
                    function into the context, we must replace it with the full
                    version once its body has been typechecked.. *)
