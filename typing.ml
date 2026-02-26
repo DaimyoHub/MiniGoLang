@@ -495,6 +495,41 @@ module Func = struct
 
       
   and gen_block ctx local_start acc = function
+    (* We first type every statement in the block : *)
+    | e :: rest ->
+        let* te = gen_expr ctx e <?> dummy_err in
+        let local_vars =
+          (* Still sucks but it works... I should try to find another way to
+             separate initial local context from a full local context *)
+          List.filteri (fun i _ -> i < List.length ctx - local_start) ctx
+        in
+        let* ctx' =
+         begin
+          match te.expr_desc with
+          | TEvars vars ->
+             begin
+              match
+                List.find_opt
+                  (fun v ->
+                    List.exists
+                      (fun (name, _) -> name = v.v_name && v.v_name <> "_" && name <> "_")
+                      local_vars)
+                  vars
+              with
+              (* If there are some local variables that are redeclared, we
+                 report it *)
+              | Some v -> report Redeclared_var v.v_loc
+              (* Otherwise, we can just fill up the new context with new local
+                 variables *)
+              | None -> return (List.fold_left (fun ctx v -> (v.v_name, v) :: ctx) ctx vars)
+             end
+          | _ -> return ctx
+         end
+         <?> dummy_err
+        in
+        gen_block ctx' local_start (te :: acc) rest
+    
+    (* When every statement in the block has been succesfully typed : *)
     | [] ->
        begin
         (* We compute the return type. This is not e.expr_typ because
@@ -521,36 +556,6 @@ module Func = struct
         | (_, v) :: _ -> report Unused_var v.v_loc
         | _ -> mk (TEblock t_exprs) t_ret
        end
-
-    | e :: rest ->
-    let* te = gen_expr ctx e <?> dummy_err in
-    let local_vars =
-      List.filteri (fun i _ -> i < List.length ctx - local_start) ctx
-    in
-    let* ctx' =
-     begin
-      match te.expr_desc with
-      | TEvars vars ->
-         begin
-          match
-            List.find_opt
-              (fun v ->
-                List.exists
-                  (fun (name, _) ->
-                    name = v.v_name && v.v_name <> "_" && name <> "_")
-                  local_vars)
-              vars
-          with
-          | Some v -> report Redeclared_var v.v_loc
-          | None ->
-              return
-                (List.fold_left (fun ctx v -> (v.v_name, v) :: ctx) ctx vars)
-         end
-      | _ -> return ctx
-     end
-     <?> dummy_err
-    in
-    gen_block ctx' local_start (te :: acc) rest
 
   and gen_call (ctx : (string * var) list) (ident : Ast.ident) (args : pexpr list) : expr t =
     (* The parser generates a classic call expression when finding the new
@@ -627,6 +632,7 @@ module Func = struct
           || (ty1 == Tnil && is_nilable ty2)
           || (ty2 == Tnil && is_nilable ty1)
         then
+          (* 'nil == nil' is ill typed *)
           if not (ty1 == Tnil) then mk (TEbinop (bop, t1, t2)) Tbool
           else report Nil_eq e1.pexpr_loc
         else report Binop e2.pexpr_loc
@@ -739,7 +745,8 @@ let file ~debug:b (imp, dl : Ast.pfile) : Tast.tfile =
     pstructs;
 
   (* And we finally check that there are no cycled dependencies including no
-     indirections *)
+     indirections. For that, we analyze each field's type of each structure
+     recursively. *)
   let rec check_cycles strc visited ftyp floc =
     match ftyp with
     (* If the field's type is a pointer, it never induces an illegal cycle so
