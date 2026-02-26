@@ -523,14 +523,34 @@ module Func = struct
        end
 
     | e :: rest ->
-        let* te = gen_expr ctx e <?> dummy_err in
-        let ctx' =
-          match te.expr_desc with
-          | TEvars vars ->
-              List.fold_left (fun ctx v -> (v.v_name, v) :: ctx) ctx vars
-          | _ -> ctx
-        in
-        gen_block ctx' local_start (te :: acc) rest
+    let* te = gen_expr ctx e <?> dummy_err in
+    let local_vars =
+      List.filteri (fun i _ -> i < List.length ctx - local_start) ctx
+    in
+    let* ctx' =
+     begin
+      match te.expr_desc with
+      | TEvars vars ->
+         begin
+          match
+            List.find_opt
+              (fun v ->
+                List.exists
+                  (fun (name, _) ->
+                    name = v.v_name && v.v_name <> "_" && name <> "_")
+                  local_vars)
+              vars
+          with
+          | Some v -> report Redeclared_var v.v_loc
+          | None ->
+              return
+                (List.fold_left (fun ctx v -> (v.v_name, v) :: ctx) ctx vars)
+         end
+      | _ -> return ctx
+     end
+     <?> dummy_err
+    in
+    gen_block ctx' local_start (te :: acc) rest
 
   and gen_call (ctx : (string * var) list) (ident : Ast.ident) (args : pexpr list) : expr t =
     (* The parser generates a classic call expression when finding the new

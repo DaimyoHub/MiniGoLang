@@ -52,6 +52,7 @@ type err =
   | Expected_ret
   | Incorrect_ret
   | Dead_code
+  | Redeclared_var
 
 type rep =
   | Rep of err * location * rep

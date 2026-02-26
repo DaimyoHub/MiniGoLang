@@ -118,6 +118,7 @@ let string_of_err = function
   | Incorrect_ret    -> "Return value does not correspond to return type."
   | Dead_code        -> "Found code after return instruction."
   | Nil_eq           -> "Cannot check equality of two nil values."
+  | Redeclared_var   -> "Redeclaring a variable that already exists."
   | Dummy            -> ""
 
 let string_of_loc (loc : Ast.location) : string =
