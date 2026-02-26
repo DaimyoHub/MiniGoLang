@@ -168,11 +168,21 @@ module Util = struct
   let rec find_return_typ (e : expr) : typ option =
     match e.expr_desc with
     | TEreturn _ -> Some e.expr_typ
-    | TEblock es -> List.find_map find_return_typ es
+    | TEblock es ->
+        let rec loop = function
+          | [] -> None
+          | e :: es ->
+             begin
+              match find_return_typ e with
+               | Some t -> Some t
+               | None   -> loop es
+             end
+        in
+        loop es
     | TEif (_, e1, e2) ->
        begin
         match find_return_typ e1, find_return_typ e2 with
-        | Some t1, Some t2 when t1 == t2 -> Some t1
+        | Some t1, Some t2 -> Some t1
         | _ -> None
        end
     | _ -> None
@@ -449,24 +459,24 @@ module Func = struct
             
             begin
               match t_e1.expr_typ, t_e2.expr_typ with
-              | Tmany [], Tmany [] -> mk (TEif (t_cond, t_e1, t_e2)) (Tmany [])
               | t, Tmany [] when t_e2.expr_desc = TEskip ->
                   mk (TEif (t_cond, t_e1, t_e2)) (Tmany [])
               | t1, t2 when t1 == t2 -> mk (TEif (t_cond, t_e1, t_e2)) t1
               (* If the conditional returns in the first branch and does not
                   define the else branch, we shouldn't check branches typing
-                  constraints (because there are none) and we consider that it
-                  returns nothing at all. *)
+                  constraints (because there are none). *)
               | _ -> report If e.pexpr_loc
             end
 
       | PEreturn exprs ->
           let* t_exprs = gen_exprs ctx exprs gen_expr <?> (Return, e.pexpr_loc) in
-          if
-            ret_typ ==
-              (typ_of_typ_list
-                (List.map (fun t_expr -> t_expr.expr_typ) t_exprs))
-          then mk (TEreturn t_exprs) ret_typ
+          let ret_typs =
+            typ_of_typ_list (List.map (fun t_expr -> t_expr.expr_typ) t_exprs)
+          in
+          (* We check if values are compatible with the return type exactly as
+             we check that arguments are compatible with parameter list *)
+          if compatible_param_arg ret_typ ret_typs then
+            mk (TEreturn t_exprs) ret_typ
           else report Return e.pexpr_loc
 
       | PEblock exprs -> gen_block ctx (List.length ctx) [] exprs
@@ -791,7 +801,11 @@ let file ~debug:b (imp, dl : Ast.pfile) : Tast.tfile =
                     if fn_sig.fn_typ = [] then ()
                     else raise (Err (pf.pf_name.loc, Rep (Expected_ret, pf.pf_name.loc, Nil)))
                 | Some rtyp ->
-                    if rtyp == Util.typ_of_typ_list fn_sig.fn_typ then ()
+                    let fn_sig_rtyp = Util.typ_of_typ_list fn_sig.fn_typ in
+                    if
+                      (rtyp == fn_sig_rtyp)
+                        || (Util.is_nilable fn_sig_rtyp && rtyp == Tnil)
+                    then ()
                     else raise (Err (pf.pf_name.loc, Rep (Incorrect_ret, pf.pf_name.loc, Nil)));
                 
                 (* Then because of the proactive adding of the currently analyzed
