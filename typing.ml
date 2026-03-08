@@ -687,6 +687,57 @@ end
 
 exception Err of Ast.location * Error.rep
 
+let rec print_expr e =
+  match e.expr_desc with
+  | TEskip ->
+      Printf.eprintf "TEskip\n%!"
+  | TEconstant _ ->
+      Printf.eprintf "TEconstant\n%!"
+  | TEbinop (_, e1, e2) ->
+      Printf.eprintf "TEbinop\n%!";
+      print_expr e1;
+      print_expr e2
+  | TEunop (_, e1) ->
+      Printf.eprintf "TEunop\n%!";
+      print_expr e1
+  | TEnil ->
+      Printf.eprintf "TEnil\n%!"
+  | TEnew _ ->
+      Printf.eprintf "TEnew\n%!"
+  | TEcall (fn, args) ->
+      Printf.eprintf "TEcall(%s)\n%!" fn.fn_name;
+      List.iter print_expr args
+  | TEident v ->
+      Printf.eprintf "TEident(%s)\n%!" v.v_name
+  | TEdot (e1, f) ->
+      Printf.eprintf "TEdot(%s)\n%!" f.f_name;
+      print_expr e1
+  | TEassign (lhs, rhs) ->
+      Printf.eprintf "TEassign\n%!";
+      List.iter print_expr lhs;
+      List.iter print_expr rhs
+  | TEvars vars ->
+      Printf.eprintf "TEvars[%s]\n%!"
+        (String.concat "," (List.map (fun v -> v.v_name) vars))
+  | TEif (c, t, e) ->
+      Printf.eprintf "TEif\n%!";
+      print_expr c; print_expr t; print_expr e
+  | TEreturn es ->
+      Printf.eprintf "TEreturn\n%!";
+      List.iter print_expr es
+  | TEblock es ->
+      Printf.eprintf "TEblock[\n%!";
+      List.iter print_expr es;
+      Printf.eprintf "]\n%!"
+  | TEfor (c, b) ->
+      Printf.eprintf "TEfor\n%!";
+      print_expr c; print_expr b
+  | TEprint es ->
+      Printf.eprintf "TEprint\n%!";
+      List.iter print_expr es
+  | TEincdec (e1, _) ->
+      Printf.eprintf "TEincdec\n%!";
+      print_expr e1
 let file ~debug:b (imp, dl : Ast.pfile) : Tast.tfile =
   debug := b;
 
@@ -823,30 +874,27 @@ let file ~debug:b (imp, dl : Ast.pfile) : Tast.tfile =
             | Ok body ->
                 (* We check that the inferred return typ corresponds to the
                    signature return type. *)
-                match Util.find_return_typ body with
-                | None ->
-                    if fn_sig.fn_typ = [] then ()
-                    else raise (Err (pf.pf_name.loc, Rep (Expected_ret, pf.pf_name.loc, Nil)))
-                | Some rtyp ->
-                    let fn_sig_rtyp = Util.typ_of_typ_list fn_sig.fn_typ in
-                    if
-                      (rtyp == fn_sig_rtyp)
-                        || (Util.is_nilable fn_sig_rtyp && rtyp == Tnil)
-                    then ()
-                    else raise (Err (pf.pf_name.loc, Rep (Incorrect_ret, pf.pf_name.loc, Nil)));
-                
-                (* Then because of the proactive adding of the currently analyzed
-                   function into the context, we must replace it with the full
-                   version once its body has been typechecked.. *)
+                begin
+                  match Util.find_return_typ body with
+                  | None ->
+                      if fn_sig.fn_typ <> [] then
+                        raise (Err (pf.pf_name.loc, Rep (Expected_ret, pf.pf_name.loc, Nil)))
+
+                  | Some rtyp ->
+                      let fn_sig_rtyp = Util.typ_of_typ_list fn_sig.fn_typ in
+                      if not ((rtyp == fn_sig_rtyp)
+                              || (Util.is_nilable fn_sig_rtyp && rtyp == Tnil))
+                      then
+                        raise (Err (pf.pf_name.loc, Rep (Incorrect_ret, pf.pf_name.loc, Nil)))
+                end;
+
                 tfile :=
                   List.map
                     (fun x ->
                       match x with
-                      | TDfunction (s, _) ->
-                          (* The condition works as far as functions have a unique
-                             name *)
-                          if s.fn_name = fn_sig.fn_name then TDfunction (s, body) else x
-                      | x -> x)
+                      | TDfunction (s, _) when s.fn_name = fn_sig.fn_name ->
+                          TDfunction (s, body)
+                      | _ -> x)
                     !tfile
            end
        end)
@@ -856,4 +904,11 @@ let file ~debug:b (imp, dl : Ast.pfile) : Tast.tfile =
     raise (Err (dummy_loc, Rep (Main_not_found, dummy_loc, Nil)))
   else if imp && not !has_print then
     raise (Err (dummy_loc, Rep (Import_not_used, dummy_loc, Nil)))
-  else !tfile  
+  else List.iter
+  (function
+    | TDfunction (fn, body) ->
+        Printf.eprintf "FUNCTION %s\n%!" fn.fn_name;
+        print_expr body
+    | TDstruct s ->
+        Printf.eprintf "STRUCT %s\n%!" s.s_name)
+  !tfile; !tfile  
