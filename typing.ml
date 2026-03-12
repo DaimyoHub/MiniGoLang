@@ -227,7 +227,17 @@ module Func = struct
         if List.exists (fun (id, _) -> id.id = ident.id) rest then Some ident
         else find_dup_param rest
   let gen_signature (decls : tfile) (func : pfunc) : function_ t =
-    if List.exists (fun td ->
+    match
+      List.filter
+        (function TDfunction (f, _) -> f.fn_name = func.pf_name.id | _ -> false)
+        decls
+    with
+    | _ :: _ :: _ -> report Several_funcs func.pf_name.loc
+    | _ ->
+      match find_dup_param func.pf_params with
+      | Some ident -> report Duplicate_params ident.loc
+      | None -> (
+    (* if List.exists (fun td ->
       match td with
       | TDfunction (f, _) when f.fn_name = func.pf_name.id -> true
       | _ -> false)
@@ -236,7 +246,7 @@ module Func = struct
     else
       match find_dup_param func.pf_params with
           | Some ident -> report Duplicate_params ident.loc
-          | None -> (
+          | None -> ( *)
     let open Util in
     
     let loc = func.pf_name.loc in
@@ -797,58 +807,63 @@ let file ~debug:b (imp, dl : Ast.pfile) : Tast.tfile =
     (function
     | PDstruct _ -> ()
     | PDfunction pf ->
+        match Func.gen_signature !tfile pf with
+        | Error rep -> raise (Err (pf.pf_name.loc, rep))
+        | Ok fn_sig ->
+            tfile :=
+              TDfunction
+                ( fn_sig, { expr_typ = Tnil; expr_desc = TEskip } )
+              :: !tfile;
+
+           if pf.pf_name.id = "main" then
+            begin
+             main_defined := true;
+              
+             if fn_sig.fn_typ <> [] || fn_sig.fn_params <> [] then
+               raise
+                 (Err (pf.pf_name.loc,
+                  Rep (Main_non_void, pf.pf_name.loc, Nil)));
+            end)
+    dl;
+
+
+  List.iter
+    (function
+    | PDstruct _ -> ()
+    | PDfunction pf ->
        begin
         match Func.gen_signature !tfile pf with
         | Error rep -> raise (Err (pf.pf_name.loc, rep))
         | Ok fn_sig ->
-           begin
-            (* We must make this currently analyzed function's signature available
-               to the user to allow recursive calls. *)
-            tfile :=
-              TDfunction
-                ( fn_sig,
-                  { expr_typ = Tnil; expr_desc = TEskip } )
-              :: !tfile;
-           
-            if pf.pf_name.id = "main" then
-             begin
-              main_defined := true;
-              
-              if fn_sig.fn_typ <> [] || fn_sig.fn_params <> [] then
-                raise (Err (pf.pf_name.loc, Rep (Main_non_void, pf.pf_name.loc, Nil)));
-             end;
-             
             match Func.gen_body fn_sig !tfile pf with
             | Error rep -> raise (Err (pf.pf_name.loc, rep))
             | Ok body ->
-                (* We check that the inferred return typ corresponds to the
-                   signature return type. *)
+               begin
                 match Util.find_return_typ body with
                 | None ->
-                    if fn_sig.fn_typ = [] then ()
-                    else raise (Err (pf.pf_name.loc, Rep (Expected_ret, pf.pf_name.loc, Nil)))
+                    if fn_sig.fn_typ <> [] then
+                      raise
+                        (Err (pf.pf_name.loc,
+                         Rep (Expected_ret, pf.pf_name.loc, Nil)))
                 | Some rtyp ->
                     let fn_sig_rtyp = Util.typ_of_typ_list fn_sig.fn_typ in
                     if
-                      (rtyp == fn_sig_rtyp)
-                        || (Util.is_nilable fn_sig_rtyp && rtyp == Tnil)
-                    then ()
-                    else raise (Err (pf.pf_name.loc, Rep (Incorrect_ret, pf.pf_name.loc, Nil)));
-                
-                (* Then because of the proactive adding of the currently analyzed
-                   function into the context, we must replace it with the full
-                   version once its body has been typechecked.. *)
+                      not ((rtyp == fn_sig_rtyp)
+                        || (Util.is_nilable fn_sig_rtyp && rtyp == Tnil))
+                    then
+                      raise
+                        (Err (pf.pf_name.loc,
+                         Rep (Incorrect_ret, pf.pf_name.loc, Nil)));
+
                 tfile :=
                   List.map
                     (fun x ->
-                      match x with
-                      | TDfunction (s, _) ->
-                          (* The condition works as far as functions have a unique
-                             name *)
-                          if s.fn_name = fn_sig.fn_name then TDfunction (s, body) else x
-                      | x -> x)
+                       match x with
+                       | TDfunction (s, _) when s.fn_name = fn_sig.fn_name ->
+                           TDfunction (s, body)
+                       | x -> x)
                     !tfile
-           end
+               end;
        end)
     dl;
 
