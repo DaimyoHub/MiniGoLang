@@ -45,104 +45,6 @@ let ( == ) t1 t2 =
   in
   eq t1 t2
 
-module Desugar = struct
-  open Ast
-
-  (* Build PEident expression from an ident *)
-  let pe_ident (id:ident) : pexpr =
-    { pexpr_desc = PEident id; pexpr_loc = id.loc }
-
-  (* Desugar inside a list of statements (block contents).
-     This is where we can expand one stmt into multiple stmts. *)
-  let rec ds_stmt_list (es : pexpr list) : pexpr list =
-    List.concat_map ds_stmt es
-
-  (* Desugar one "statement-ish" expression into 1 or more statements *)
-  and ds_stmt (e : pexpr) : pexpr list =
-    match e.pexpr_desc with
-    | PEblock es ->
-        let es' = ds_stmt_list es in
-        [ { e with pexpr_desc = PEblock es' } ]
-
-    | PEif (c, t, f) ->
-        let c' = ds_expr c in
-        let t' = ds_expr t in
-        let f' = ds_expr f in
-        [ { e with pexpr_desc = PEif (c', t', f') } ]
-
-    | PEfor (c, body) ->
-        let c' = ds_expr c in
-        let body' = ds_expr body in
-        [ { e with pexpr_desc = PEfor (c', body') } ]
-
-    | PEassign (lhs, rhs) ->
-        [ { e with pexpr_desc = PEassign (List.map ds_expr lhs, List.map ds_expr rhs) } ]
-
-    | PEreturn rs ->
-        [ { e with pexpr_desc = PEreturn (List.map ds_expr rs) } ]
-
-    | PEincdec (x, op) ->
-        [ { e with pexpr_desc = PEincdec (ds_expr x, op) } ]
-
-    | PEvars (ids, Some t, vals) when vals <> [] ->
-        (* IMPORTANT: only safe for typed vars. *)
-        let decl =
-          { e with pexpr_desc = PEvars (ids, Some t, []) }
-        in
-        let assign =
-          { pexpr_desc = PEassign (List.map pe_ident ids, List.map ds_expr vals);
-            pexpr_loc  = e.pexpr_loc; }
-        in
-        [ decl; assign ]
-
-    | PEvars (ids, typ_opt, vals) ->
-        (* Leave untyped-with-init alone; still recurse into RHS expressions. *)
-        let vals' = List.map ds_expr vals in
-        [ { e with pexpr_desc = PEvars (ids, typ_opt, vals') } ]
-
-    | _ ->
-        (* Expression-statement, etc. Just recurse in place. *)
-        [ ds_expr e ]
-
-  (* Desugar inside expressions: here we can’t expand into multiple statements,
-     so we just rebuild recursively. *)
-  and ds_expr (e : pexpr) : pexpr =
-    let d = e.pexpr_desc in
-    let d' =
-      match d with
-      | PEskip | PEnil | PEconstant _ | PEident _ -> d
-
-      | PEunop (op, a) -> PEunop (op, ds_expr a)
-      | PEbinop (op, a, b) -> PEbinop (op, ds_expr a, ds_expr b)
-
-      | PEcall (f, args) -> PEcall (f, List.map ds_expr args)
-
-      | PEdot (a, fld) -> PEdot (ds_expr a, fld)
-
-      | PEassign (lhs, rhs) ->
-          PEassign (List.map ds_expr lhs, List.map ds_expr rhs)
-
-      | PEvars (ids, typ_opt, vals) ->
-          (* NOTE: do not split here; splitting happens in ds_stmt within blocks. *)
-          PEvars (ids, typ_opt, List.map ds_expr vals)
-
-      | PEif (c, t, f) -> PEif (ds_expr c, ds_expr t, ds_expr f)
-
-      | PEreturn rs -> PEreturn (List.map ds_expr rs)
-
-      | PEblock es -> PEblock (ds_stmt_list es)
-
-      | PEfor (c, body) -> PEfor (ds_expr c, ds_expr body)
-
-      | PEincdec (x, op) -> PEincdec (ds_expr x, op)
-    in
-    { e with pexpr_desc = d' }
-
-  (* Entry point for a function body *)
-  let desugar_body (body : pexpr) : pexpr =
-    ds_expr body
-end
-
 module Util = struct
 
   let rec typ_of_ptyp (decls : tfile) (pt : ptyp) : typ t =
@@ -256,8 +158,28 @@ module Func = struct
 
   let gen_body (fn_sig : function_) (decls : tfile) (func : pfunc) : expr t =
     let open Util in
-    let open Desugar in
+    let infer_decl_vars idents t_vals =
+      List.map2
+        (fun ident t_val -> new_var ident.id ident.loc t_val.expr_typ)
+        idents t_vals
+    in
 
+    let make_decl_and_assign t_vars t_vals =
+      let te_decl =
+        { expr_desc = TEvars (List.filter (fun v -> v.v_name <> "_") t_vars);
+          expr_typ  = Tmany [] }
+      in
+      let lhs =
+        List.map
+          (fun v -> { expr_desc = TEident v; expr_typ = v.v_typ })
+          t_vars
+      in
+      let te_assign =
+        { expr_desc = TEassign (lhs, t_vals);
+          expr_typ  = Tmany [] }
+      in
+      (te_decl, te_assign)
+    in
     let ret_typ = typ_of_typ_list fn_sig.fn_typ in
     let compatible_param_arg (p:typ) (a:typ) = a == p || (a == Tnil && is_nilable p) in 
 
@@ -367,89 +289,22 @@ module Func = struct
           else report Assignments e.pexpr_loc
 
       | PEvars (idents, typ_opt, vals) ->
-          let* t_vals = gen_exprs ctx vals gen_expr <?> (Rvalues, e.pexpr_loc) in
-          begin
-            match typ_opt with
-      | Some ptyp ->
-          let* typ =
-            typ_of_ptyp decls ptyp <?> (Unknown_typ, e.pexpr_loc)
-          in
-
-          let n = List.length idents in
-
-          let ok =
-            match t_vals with
-            | [] ->
-                true
-
-            (* normal init: var x,y T = e1,e2 *)
-            | _ when List.length t_vals = n ->
-                List.for_all (fun tv -> compatible_param_arg typ tv.expr_typ) t_vals
-
-            (* multi-return init: var x,y T = g() where g returns (T,T) *)
-            | [single] ->
-                (match get_multi_returns single with
-                | Some rets ->
-                    List.length rets = n
-                    && List.for_all (fun rt -> compatible_param_arg typ rt) rets
-                | None -> false)
-
-            | _ -> false
-          in
-
-          if not ok then report Var e.pexpr_loc
-          else
+        begin match typ_opt, vals with
+        | Some ptyp, [] ->
+            let* typ =
+              typ_of_ptyp decls ptyp <?> (Unknown_typ, e.pexpr_loc)
+            in
             let t_vars =
               List.map (fun ident -> new_var ident.id ident.loc typ) idents
             in
             mk (TEvars (List.filter (fun v -> v.v_name <> "_") t_vars)) (Tmany [])
 
-      | None ->
-          let n = List.length idents in
+        | None, [] ->
+            report Var e.pexpr_loc
 
-          let is_untyped_nil (te:expr) = (te.expr_typ == Tnil) in
-
-          (* Case A: normal inference var x1..xn = e1..en *)
-          let ok_normal =
-            List.length t_vals = n
-            && List.for_all (fun tv -> not (is_untyped_nil tv)) t_vals
-          in
-
-          (* Case B: multi-return inference var x1..xn = g() *)
-          let ok_expand, inferred_tys =
-            match t_vals with
-            | [single] ->
-                (match get_multi_returns single with
-                | Some rets when List.length rets = n ->
-                    (* forbid untyped nil in inferred types *)
-                    if List.exists (fun t -> t == Tnil) rets then (false, [])
-                    else (true, rets)
-                | _ -> (false, []))
-            | _ -> (false, [])
-          in
-
-          if ok_normal then
-            let t_vars =
-              List.map2
-                (fun ident t_val -> new_var ident.id ident.loc t_val.expr_typ)
-                idents t_vals
-            in
-            mk (TEvars t_vars) (Tmany [])
-          else if ok_expand then
-            let t_vars =
-              List.map2
-                (fun ident ty -> new_var ident.id ident.loc ty)
-                idents inferred_tys
-            in
-            mk (TEvars t_vars) (Tmany [])
-          else
-            if List.length t_vals <> n then report Arity e.pexpr_loc
-            else
-              match List.find_opt (fun v -> v.pexpr_desc = PEnil) vals with
-              | Some v -> report Untyped_Nil_init v.pexpr_loc
-              | None -> report Arity e.pexpr_loc
-                end
-                
+        | _ ->
+            failwith "internal error: initialized declaration should be handled in gen_block"
+        end
       | PEif (cond, e1, e2) ->
           let* t_cond = gen_expr ctx cond <?> (Cond, cond.pexpr_loc) in               
           if not (t_cond.expr_typ == Tbool) then report Cond cond.pexpr_loc
@@ -494,48 +349,129 @@ module Func = struct
           else report Incdec e.pexpr_loc
 
       
-  and gen_block ctx local_start acc = function
-    (* We first type every statement in the block : *)
-    | e :: rest ->
-        let* te = gen_expr ctx e <?> dummy_err in
-        let local_vars =
-          (* Still sucks but it works... I should try to find another way to
-             separate initial local context from a full local context *)
-          List.filteri (fun i _ -> i < List.length ctx - local_start) ctx
-        in
-        let* ctx' =
-         begin
-          match te.expr_desc with
-          | TEvars vars ->
-             begin
-              match
-                List.find_opt
-                  (fun v ->
-                    List.exists
-                      (fun (name, _) -> name = v.v_name && v.v_name <> "_" && name <> "_")
-                      local_vars)
-                  vars
-              with
-              (* If there are some local variables that are redeclared, we
-                 report it *)
-              | Some v -> report Redeclared_var v.v_loc
-              (* Otherwise, we can just fill up the new context with new local
-                 variables *)
-              | None -> return (List.fold_left (fun ctx v -> (v.v_name, v) :: ctx) ctx vars)
-             end
-          | _ -> return ctx
-         end
-         <?> dummy_err
-        in
-        gen_block ctx' local_start (te :: acc) rest
-    
-    (* When every statement in the block has been succesfully typed : *)
-    | [] ->
-       begin
-        (* We compute the return type. This is not e.expr_typ because
-           the bloc might contain 'x++', which is not an instruction and
-           an expression at the same time. So we must filter these kinds
-           of expressions to be able to extract only return instructions. *)
+and gen_block ctx local_start acc = function
+  | ({ pexpr_desc = PEvars (idents, typ_opt, vals); pexpr_loc = loc } as e) :: rest
+    when vals <> [] ->
+      let* t_vals = gen_exprs ctx vals gen_expr <?> (Rvalues, loc) in
+      let n = List.length idents in
+
+      let local_vars =
+        List.filteri (fun i _ -> i < List.length ctx - local_start) ctx
+      in
+
+      let add_new_vars vars =
+        match
+          List.find_opt
+            (fun v ->
+              List.exists
+                (fun (name, _) -> name = v.v_name && v.v_name <> "_" && name <> "_")
+                local_vars)
+            vars
+        with
+        | Some v -> report Redeclared_var v.v_loc
+        | None ->
+            return (List.fold_left (fun ctx v -> (v.v_name, v) :: ctx) ctx vars)
+      in
+
+      begin match typ_opt with
+      | Some ptyp ->
+          let* typ =
+            typ_of_ptyp decls ptyp <?> (Unknown_typ, loc)
+          in
+
+          let ok =
+            match t_vals with
+            | [] -> true
+            | _ when List.length t_vals = n ->
+                List.for_all (fun tv -> compatible_param_arg typ tv.expr_typ) t_vals
+            | [single] ->
+                (match get_multi_returns single with
+                 | Some rets ->
+                     List.length rets = n
+                     && List.for_all (fun rt -> compatible_param_arg typ rt) rets
+                 | None -> false)
+            | _ -> false
+          in
+
+          if not ok then report Var loc
+          else
+            let t_vars =
+              List.map (fun ident -> new_var ident.id ident.loc typ) idents
+            in
+            let* ctx' = add_new_vars t_vars <?> dummy_err in
+            let te_decl, te_assign = make_decl_and_assign t_vars t_vals in
+            gen_block ctx' local_start (te_assign :: te_decl :: acc) rest
+
+      | None ->
+          let is_untyped_nil (te:expr) = (te.expr_typ == Tnil) in
+
+          let ok_normal =
+            List.length t_vals = n
+            && List.for_all (fun tv -> not (is_untyped_nil tv)) t_vals
+          in
+
+          let ok_expand, inferred_tys =
+            match t_vals with
+            | [single] ->
+                (match get_multi_returns single with
+                 | Some rets when List.length rets = n ->
+                     if List.exists (fun t -> t == Tnil) rets then (false, [])
+                     else (true, rets)
+                 | _ -> (false, []))
+            | _ -> (false, [])
+          in
+
+          if ok_normal then
+            let t_vars = infer_decl_vars idents t_vals in
+            let* ctx' = add_new_vars t_vars <?> dummy_err in
+            let te_decl, te_assign = make_decl_and_assign t_vars t_vals in
+            gen_block ctx' local_start (te_assign :: te_decl :: acc) rest
+
+          else if ok_expand then
+            let t_vars =
+              List.map2
+                (fun ident ty -> new_var ident.id ident.loc ty)
+                idents inferred_tys
+            in
+            let* ctx' = add_new_vars t_vars <?> dummy_err in
+            let te_decl, te_assign = make_decl_and_assign t_vars t_vals in
+            gen_block ctx' local_start (te_assign :: te_decl :: acc) rest
+
+          else if List.length t_vals <> n then
+            report Arity loc
+          else
+            match List.find_opt (fun v -> v.pexpr_desc = PEnil) vals with
+            | Some v -> report Untyped_Nil_init v.pexpr_loc
+            | None -> report Arity loc
+      end
+
+  | e :: rest ->
+      let* te = gen_expr ctx e <?> dummy_err in
+      let local_vars =
+        List.filteri (fun i _ -> i < List.length ctx - local_start) ctx
+      in
+      let* ctx' =
+        begin match te.expr_desc with
+        | TEvars vars ->
+            begin match
+              List.find_opt
+                (fun v ->
+                  List.exists
+                    (fun (name, _) -> name = v.v_name && v.v_name <> "_" && name <> "_")
+                    local_vars)
+                vars
+            with
+            | Some v -> report Redeclared_var v.v_loc
+            | None -> return (List.fold_left (fun ctx v -> (v.v_name, v) :: ctx) ctx vars)
+            end
+        | _ -> return ctx
+        end
+        <?> dummy_err
+      in
+      gen_block ctx' local_start (te :: acc) rest
+
+  | [] ->
+      begin
         let t_exprs = List.rev acc in
         let t_ret =
           match
@@ -545,18 +481,15 @@ module Func = struct
           | None -> Tmany []
           | Some t -> t
         in
-                
-        (* We check that every local variable of the block has been used
-           at least once. *)
+
         let local_vars =
-          (* I don't like that be it works *)
           List.filteri (fun i _ -> i < List.length ctx - local_start) ctx
         in
         match List.filter (fun (s, v) -> not v.v_used && s <> "_") local_vars with
         | (_, v) :: _ -> report Unused_var v.v_loc
         | _ -> mk (TEblock t_exprs) t_ret
-       end
-
+      end
+      
   and gen_call (ctx : (string * var) list) (ident : Ast.ident) (args : pexpr list) : expr t =
     (* The parser generates a classic call expression when finding the new
       keyword. So we should handle typechking of it differently from other
@@ -675,13 +608,18 @@ module Func = struct
           let* te = gen_expr ctx e <?> (Unop, e.pexpr_loc) in
            if te.expr_typ == Tbool then mk (TEunop (Unot,  te)) Tbool
            else report Unop e.pexpr_loc
-       | Uamp  -> 
+       | Uamp  ->
           let* te = lvalue ctx e <?> (Lvalues, e.pexpr_loc) in
+          begin match te.expr_desc with
+          | TEident v ->
+              v.v_addr <- true
+          | _ ->
+              ()
+          end;
           mk (TEunop (Uamp, te)) (Tptr te.expr_typ)
        | Ustar -> report Unop e.pexpr_loc
     in
-    let body = Desugar.desugar_body func.pf_body in
-    gen_expr init_ctx body
+    gen_expr init_ctx func.pf_body
 
 end
 
@@ -904,11 +842,5 @@ let file ~debug:b (imp, dl : Ast.pfile) : Tast.tfile =
     raise (Err (dummy_loc, Rep (Main_not_found, dummy_loc, Nil)))
   else if imp && not !has_print then
     raise (Err (dummy_loc, Rep (Import_not_used, dummy_loc, Nil)))
-  else List.iter
-  (function
-    | TDfunction (fn, body) ->
-        Printf.eprintf "FUNCTION %s\n%!" fn.fn_name;
-        print_expr body
-    | TDstruct s ->
-        Printf.eprintf "STRUCT %s\n%!" s.s_name)
-  !tfile; !tfile  
+  else 
+   !tfile  
