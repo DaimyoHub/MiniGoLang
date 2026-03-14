@@ -6,7 +6,6 @@ open X86_64
 let debug = ref false
 
 let iter f = List.fold_left (fun code x -> code ++ f x) nop
-let iter2 f = List.fold_left2 (fun code x y -> code ++ f x y) nop
 
 let new_label =
   let r = ref 0 in
@@ -15,6 +14,9 @@ let new_label =
 let stringToLabel : (string, string) Hashtbl.t = Hashtbl.create 5
 let frame_sizes : (string, int) Hashtbl.t = Hashtbl.create 17
 
+let sizeof = function
+  | Tstruct s -> s.s_size
+  | _ -> 8
 
 let is_atom_like = function
   | Tint | Tbool | Tnil | Tptr _ -> true
@@ -25,22 +27,29 @@ let emit_space =
   call "printf"
 
 let rec emit_print_one (p : expr) =
-  expr p ++
-  xorq (reg rax) (reg rax) ++
   match p.expr_typ with
   | Tstring ->
+      expr p ++
       movq (reg r10) (reg rdi) ++
+      xorq (reg rax) (reg rax) ++
       call "printf"
+
   | Tint ->
+      expr p ++
       movq (reg r10) (reg rsi) ++
       movq (ilab "INT_PRINTER") (reg rdi) ++
+      xorq (reg rax) (reg rax) ++
       call "printf"
+
   | Tbool ->
+      expr p ++
       call "print_bool_r10"
+
   | Tnil ->
       movq (ilab "NIL_STR") (reg rdi) ++
-      xorq (reg rax) (reg rax) ++      
+      xorq (reg rax) (reg rax) ++
       call "printf"
+
   | Tptr _ ->
       let l_nil = new_label () in
       let l_end = new_label () in
@@ -65,9 +74,6 @@ let rec emit_print_one (p : expr) =
 and addr (e : expr) =
   match e.expr_desc with
 | TEident v ->
-    if v.v_addr then
-      movq (ind ~ofs:v.v_ofs rbp) (reg r10)
-    else
       leaq (ind ~ofs:v.v_ofs rbp) r10
 
   | TEdot (e1, f) ->
@@ -257,8 +263,7 @@ and expr (e : expr) =
           movzbq (reg al) r10
       end
 
-  | TEblock es ->
-      iter expr es
+  | TEblock _ -> failwith "expr: block should be handled by stmt"
 
   | TEprint es ->
       let rec go = function
@@ -307,15 +312,10 @@ and expr (e : expr) =
       movq (reg rax) (reg r10)
 
   | TEnew ty ->
-        let size =
-        match ty with
-        | Tstruct s -> s.s_size
-        | _ -> 8
-        in
-        movq (imm 1) (reg rdi) ++
-        movq (imm size) (reg rsi) ++
-        call "calloc_" ++
-        movq (reg rax) (reg r10)
+      movq (imm 1) (reg rdi) ++
+      movq (imm (sizeof ty)) (reg rsi) ++
+      call "calloc_" ++
+      movq (reg rax) (reg r10)
 
 (* stmt ret_lbl e:
    generate statement/control-flow code *)
@@ -407,47 +407,7 @@ let zero_frame frame_size =
       movq (imm 0) (ind ~ofs:(-ofs) rbp) ++ aux (ofs - 8)
   in
   aux frame_size
-let init_addr_taken_vars (fn : function_) (body : expr) =
-  let code = ref nop in
-  let seen : (int, unit) Hashtbl.t = Hashtbl.create 17 in
 
-  let init_once (v : var) =
-    if v.v_addr && v.v_ofs <> -1 && not (Hashtbl.mem seen v.v_id) then begin
-      Hashtbl.add seen v.v_id ();
-      code :=
-        !code ++
-        movq (imm 1) (reg rdi) ++
-        movq (imm 8) (reg rsi) ++
-        call "calloc_" ++
-        movq (reg rax) (ind ~ofs:v.v_ofs rbp)
-    end
-  in
-
-  let rec visit_expr (e : expr) =
-    match e.expr_desc with
-    | TEskip
-    | TEconstant _
-    | TEnil -> ()
-
-    | TEident v -> init_once v
-    | TEunop (_, e1) -> visit_expr e1
-    | TEbinop (_, e1, e2) -> visit_expr e1; visit_expr e2
-    | TEnew _ -> ()
-    | TEcall (_, args) -> List.iter visit_expr args
-    | TEdot (e1, _) -> visit_expr e1
-    | TEassign (lhs, rhs) -> List.iter visit_expr lhs; List.iter visit_expr rhs
-    | TEvars vars -> List.iter init_once vars
-    | TEif (c, e1, e2) -> visit_expr c; visit_expr e1; visit_expr e2
-    | TEreturn es -> List.iter visit_expr es
-    | TEblock es -> List.iter visit_expr es
-    | TEfor (c, b) -> visit_expr c; visit_expr b
-    | TEprint es -> List.iter visit_expr es
-    | TEincdec (e1, _) -> visit_expr e1
-  in
-
-  List.iter init_once fn.fn_params;
-  visit_expr body;
-  !code
 let layout_function (fn : function_) (body : expr) =
   let ofs = ref 0 in
 
@@ -521,22 +481,18 @@ let layout_function (fn : function_) (body : expr) =
     if size mod 16 = 0 then size else size + (16 - size mod 16)
   in
   Hashtbl.replace frame_sizes fn.fn_name aligned_size
+
 let save_params (fn : function_) =
   let rec aux i = function
     | [] -> nop
     | p :: ps ->
         let incoming_ofs = 16 + 8 * i in
-        (if p.v_addr then
-           (* [rbp + p.v_ofs] contains the pointer to the backing cell *)
-           movq (ind ~ofs:p.v_ofs rbp) (reg r10) ++
-           movq (ind ~ofs:incoming_ofs rbp) (reg r11) ++
-           movq (reg r11) (ind r10)
-         else
-           movq (ind ~ofs:incoming_ofs rbp) (reg r11) ++
-           movq (reg r11) (ind ~ofs:p.v_ofs rbp))
-        ++ aux (i + 1) ps
+        movq (ind ~ofs:incoming_ofs rbp) (reg r11) ++
+        movq (reg r11) (ind ~ofs:p.v_ofs rbp) ++
+        aux (i + 1) ps
   in
   aux 0 fn.fn_params
+
 let decl = function
   | TDfunction (fn, body) ->
       let asm_name = if fn.fn_name = "main" then "go_main" else fn.fn_name in
@@ -551,7 +507,6 @@ let decl = function
       movq (reg rsp) (reg rbp) ++
       subq (imm frame_size) (reg rsp) ++
       zero_frame frame_size ++
-      init_addr_taken_vars fn body ++
       save_params fn ++
       stmt ret_lbl body ++
       label ret_lbl ++

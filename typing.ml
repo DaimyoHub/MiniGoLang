@@ -46,7 +46,10 @@ let ( == ) t1 t2 =
   eq t1 t2
 
 module Util = struct
-
+  let rec sizeof_typ = function
+    | Tint | Tbool | Tstring | Tptr _ | Tnil -> 8
+    | Tstruct s -> s.s_size
+    | Tmany _ -> assert false
   let rec typ_of_ptyp (decls : tfile) (pt : ptyp) : typ t =
     match pt with
     | PTident ident ->
@@ -720,7 +723,7 @@ let file ~debug:b (imp, dl : Ast.pfile) : Tast.tfile =
             | Error rep -> raise (Err (fid.loc, rep))
             | Ok ft ->
                 let f = { f_name = fid.id; f_typ = ft; f_ofs = !ofs } in
-                ofs := !ofs + 8;
+                ofs := !ofs + Util.sizeof_typ ft;
                 
             if Hashtbl.mem strc.s_fields fid.id then
               raise (Err (fid.loc, Rep (Duplicate_fields, fid.loc, Nil)))
