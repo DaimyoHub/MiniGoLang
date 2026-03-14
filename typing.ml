@@ -820,7 +820,6 @@ let file ~debug:b (imp, dl : Ast.pfile) : Tast.tfile =
     (function
     | PDstruct _ -> ()
     | PDfunction pf ->
-       begin
         match Func.gen_signature !tfile pf with
         | Error rep -> raise (Err (pf.pf_name.loc, rep))
         | Ok fn_sig ->
@@ -831,29 +830,24 @@ let file ~debug:b (imp, dl : Ast.pfile) : Tast.tfile =
                 match Util.find_return_typ body with
                 | None ->
                     if fn_sig.fn_typ <> [] then
-                      raise
-                        (Err (pf.pf_name.loc,
-                         Rep (Expected_ret, pf.pf_name.loc, Nil)))
+                      raise (Err (pf.pf_name.loc, Rep (Expected_ret, pf.pf_name.loc, Nil)))
+
                 | Some rtyp ->
                     let fn_sig_rtyp = Util.typ_of_typ_list fn_sig.fn_typ in
-                    if
-                      not ((rtyp == fn_sig_rtyp)
-                        || (Util.is_nilable fn_sig_rtyp && rtyp == Tnil))
+                    if not ((rtyp == fn_sig_rtyp)
+                            || (Util.is_nilable fn_sig_rtyp && rtyp == Tnil))
                     then
-                      raise
-                        (Err (pf.pf_name.loc,
-                         Rep (Incorrect_ret, pf.pf_name.loc, Nil)));
-
-                tfile :=
-                  List.map
-                    (fun x ->
-                      match x with
-                      | TDfunction (s, _) when s.fn_name = fn_sig.fn_name ->
-                          TDfunction (s, body)
-                      | _ -> x)
-                    !tfile
+                      raise (Err (pf.pf_name.loc, Rep (Incorrect_ret, pf.pf_name.loc, Nil)))
                end;
-       end)
+
+        tfile :=
+          List.map
+              (fun x ->
+                match x with
+                | TDfunction (s, _) when s.fn_name = fn_sig.fn_name ->
+                    TDfunction (s, body)
+                | _ -> x)
+              !tfile)
     dl;
 
   if not !main_defined then

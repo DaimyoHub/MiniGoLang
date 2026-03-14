@@ -159,6 +159,15 @@ let () =
     if !show_ast then (pp_ast f; exit 0);
     if !parse_only then exit 0;
     let f = Typing.file ~debug f in
+
+    let open Tast in
+    List.iter
+      (function
+        | TDfunction (s, e) when e = { expr_typ = Tnil; expr_desc = TEskip } ->
+          print_endline ("empty function" ^ s.fn_name)
+        | _ -> ())
+      f;
+    
     if type_only then exit 0;
     let f = Rewrite.file ~debug f in
     if debug then eprintf "%a@." Pretty.file f;
