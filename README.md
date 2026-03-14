@@ -6,9 +6,6 @@ architecture. Developed incrementally on GitHub, the project was split into two
 main phases: front-end semantic analysis (parsing, type checking, and symbol
 resolution) and back-end assembly code generation.
 
-A compiler for a subset of Go targeting the **Intel x86-64** architecture,
-implemented in OCaml with Dune.
-
 **Authors:** Radu-Mihai Costache & Alexis Pocquet — M1 MPRI, École Polytechnique
 (IP Paris)
 
