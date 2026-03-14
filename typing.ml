@@ -772,7 +772,8 @@ let file ~debug:b (imp, dl : Ast.pfile) : Tast.tfile =
         ps.ps_fields)
     pstructs;
 
-  (* Then we generate functions' associated typed ASTs and signatures *)
+  (* Then we generate functions' signatures first, so that all functions are
+     available when typing bodies (forward calls + mutual recursion). *)
   if imp then begin
     let fmt_print =
       { fn_name   = "fmt.Print";
@@ -780,67 +781,69 @@ let file ~debug:b (imp, dl : Ast.pfile) : Tast.tfile =
         fn_typ    = []; }
     in
     tfile :=
-      (TDfunction (fmt_print, { expr_desc = TEskip; expr_typ = Tmany [] }))
-        :: !tfile
+      TDfunction (fmt_print, { expr_desc = TEskip; expr_typ = Tmany [] })
+      :: !tfile
   end;
-  
+
+  let pfuncs =
+    List.filter_map
+      (function
+       | PDfunction pf -> Some pf
+       | PDstruct _ -> None)
+      dl
+  in
+
   let main_defined = ref false in
+
+  (* Pass 1: collect all signatures *)
   List.iter
-    (function
-    | PDstruct _ -> ()
-    | PDfunction pf ->
-       begin
-        match Func.gen_signature !tfile pf with
+    (fun pf ->
+      match Func.gen_signature !tfile pf with
+      | Error rep -> raise (Err (pf.pf_name.loc, rep))
+      | Ok fn_sig ->
+          if pf.pf_name.id = "main" then begin
+            main_defined := true;
+            if fn_sig.fn_typ <> [] || fn_sig.fn_params <> [] then
+              raise (Err (pf.pf_name.loc, Rep (Main_non_void, pf.pf_name.loc, Nil)))
+          end;
+          tfile :=
+            TDfunction (fn_sig, { expr_desc = TEskip; expr_typ = Tmany [] })
+            :: !tfile)
+    pfuncs;
+
+  (* Pass 2: type all bodies against the complete function environment *)
+  List.iter
+    (fun pf ->
+      let fn_sig =
+        match fetch_func_from_id !tfile pf.pf_name.id with
+        | Ok (fn, _) -> fn
         | Error rep -> raise (Err (pf.pf_name.loc, rep))
-        | Ok fn_sig ->
-           begin
-            (* We must make this currently analyzed function's signature available
-               to the user to allow recursive calls. *)
-            tfile :=
-              TDfunction
-                ( fn_sig,
-                  { expr_typ = Tnil; expr_desc = TEskip } )
-              :: !tfile;
-           
-            if pf.pf_name.id = "main" then
-             begin
-              main_defined := true;
-              
-              if fn_sig.fn_typ <> [] || fn_sig.fn_params <> [] then
-                raise (Err (pf.pf_name.loc, Rep (Main_non_void, pf.pf_name.loc, Nil)));
-             end;
-             
-            match Func.gen_body fn_sig !tfile pf with
-            | Error rep -> raise (Err (pf.pf_name.loc, rep))
-            | Ok body ->
-                (* We check that the inferred return typ corresponds to the
-                   signature return type. *)
-                begin
-                  match Util.find_return_typ body with
-                  | None ->
-                      if fn_sig.fn_typ <> [] then
-                        raise (Err (pf.pf_name.loc, Rep (Expected_ret, pf.pf_name.loc, Nil)))
+      in
+      match Func.gen_body fn_sig !tfile pf with
+      | Error rep -> raise (Err (pf.pf_name.loc, rep))
+      | Ok body ->
+          begin
+            match Util.find_return_typ body with
+            | None ->
+                if fn_sig.fn_typ <> [] then
+                  raise (Err (pf.pf_name.loc, Rep (Expected_ret, pf.pf_name.loc, Nil)))
+            | Some rtyp ->
+                let fn_sig_rtyp = Util.typ_of_typ_list fn_sig.fn_typ in
+                if not ((rtyp == fn_sig_rtyp)
+                        || (Util.is_nilable fn_sig_rtyp && rtyp == Tnil))
+                then
+                  raise (Err (pf.pf_name.loc, Rep (Incorrect_ret, pf.pf_name.loc, Nil)))
+          end;
 
-                  | Some rtyp ->
-                      let fn_sig_rtyp = Util.typ_of_typ_list fn_sig.fn_typ in
-                      if not ((rtyp == fn_sig_rtyp)
-                              || (Util.is_nilable fn_sig_rtyp && rtyp == Tnil))
-                      then
-                        raise (Err (pf.pf_name.loc, Rep (Incorrect_ret, pf.pf_name.loc, Nil)))
-                end;
-
-                tfile :=
-                  List.map
-                    (fun x ->
-                      match x with
-                      | TDfunction (s, _) when s.fn_name = fn_sig.fn_name ->
-                          TDfunction (s, body)
-                      | _ -> x)
-                    !tfile
-           end
-       end)
-    dl;
-
+          tfile :=
+            List.map
+              (function
+               | TDfunction (s, _) when s.fn_name = fn_sig.fn_name ->
+                   TDfunction (s, body)
+               | x -> x)
+              !tfile)
+    pfuncs;
+    
   if not !main_defined then
     raise (Err (dummy_loc, Rep (Main_not_found, dummy_loc, Nil)))
   else if imp && not !has_print then
